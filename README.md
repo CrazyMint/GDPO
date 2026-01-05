@@ -17,7 +17,7 @@ In this repo, we provide implementation of GDPO based on [VERL](https://github.c
 
 We also include easy-to-use, slurm-free training scripts that enable the community to quickly validate GDPO’s effectiveness over GRPO on tool calling and math reasoning tasks. Each run can be completed in approximately 1 hour on a single node with 8×A100 GPUs, or around 2.5 hours on a single A100 GPU.
 
-## Quick Verification of the effectiveness of GDPO on improving two-reward RL training (Tool Calling)
+## 🚀 Quick Verification of the effectiveness of GDPO on improving two-reward RL training (Tool Calling)
 <h1 align="center"> 
     <img src="./imgs/tool_rl_gdpo.png">
 </h1>
@@ -40,7 +40,7 @@ The training set consists of 4k samples. Each training instance contains a quest
 We train Qwen2.5-1.5B-Instruct with GDPO and GRPO using verl for 100 steps. Check [verl-GDPO](./verl-GDPO) for detailed implementation of GDPO based on VERL and how to reprodcue the above result.
 
 
-## Quick Verification of the effectiveness of GDPO on improving three-reward RL training (Math Reasoning)
+## 🚀 Quick Verification of the effectiveness of GDPO on improving three-reward RL training (Math Reasoning)
 <h1 align="center"> 
     <img src="./imgs/gsm8k_gdpo.png">
 </h1>
@@ -61,7 +61,7 @@ Training is conducted on the GSM8K dataset, where each example consists of a mat
 
 We train Qwen2.5-1.5B-Instruct with GDPO and GRPO using trl for 1 epoch. Check [trl-GDPO](./trl-GDPO) for detailed implementation of GDPO based on TRL and how to reprodcue the above result.
 
-## GDPO is a straighforward drop-in replacement for GRPO
+## ⚙️ GDPO is a straighforward drop-in replacement for GRPO
 
 ### trl modification
 #### Original trl GRPO Implementation
@@ -167,13 +167,13 @@ We train Qwen2.5-1.5B-Instruct with GDPO and GRPO using trl for 1 epoch. Check [
 ```
 
 
-## Citation
+## 📝 Citation
 If you find GDPO useful, please star and cite it:
 ```bibtex
 
 ```
 
-## Licenses
+## 📜 Licenses
 Copyright © 2026, NVIDIA Corporation. All rights reserved.
 
 This work is made available under the NVIDIA Source Code License-NC. Click [here](https://github.com/NVlabs/GDPO/blob/main/LICENSE) to view a copy of this license.
