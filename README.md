@@ -9,7 +9,7 @@
 
 ## Introduction
 <h1 align="center"> 
-    <img src="./imgs/gdpo_toy.png" alt="Alt text" style="width: 45%;">
+    <img src="./imgs/gdpo_toy.png" alt="Alt text" style="width: 50%;">
 </h1>
 GDPO is a reinforcement learning optimization method designed for multi-reward training. While existing approaches commonly apply Group Relative Policy Optimization (GRPO) in multi-reward settings, we show that this leads to reward advantages collapse, reducing training signal resolution and causing unstable or failed convergence.
 
