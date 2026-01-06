@@ -7,7 +7,6 @@
         🤗 <a href="">Hugging Face Paper</a>&nbsp&nbsp | &nbsp&nbsp 📄 <a href="">Paper</a> | &nbsp&nbsp 📜 <a href="">Page</a> &nbsp
 </p>
 
-## Introduction
 <h1 align="center"> 
     <img src="./imgs/gdpo_toy.png" alt="Alt text" style="width: 50%;">
 </h1>
