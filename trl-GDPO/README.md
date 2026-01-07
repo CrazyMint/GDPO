@@ -41,4 +41,4 @@ FYI. training Qwen2.5-1.5B-Instruct on a single Node with 8xA100 takes about an 
 
 
 ## GDPO Implementation details
-Please see line 1222 in trl-0.18.0-gdpo/trl/trainer/grpo_trainer.py
+Please see [line 1222](https://github.com/NVlabs/GDPO/blob/8bc7a4f5107eedb3e0ca653c53bd4bb8b71460c3/trl-GDPO/trl-0.18.0-gdpo/trl/trainer/grpo_trainer.py#L1222) in trl-0.18.0-gdpo/trl/trainer/grpo_trainer.py

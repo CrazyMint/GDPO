@@ -67,7 +67,7 @@ We train Qwen2.5-1.5B-Instruct with GDPO and GRPO using trl for 1 epoch. Check [
 ### trl modification
 #### Original trl GRPO Implementation
 ```python
-    # line 1254 in gdpo_nvlab/trl-GDPO/trl-0.18.0-gdpo/trl/trainer/grpo_trainer.py
+    # line 1254 in trl-GDPO/trl-0.18.0-gdpo/trl/trainer/grpo_trainer.py
     # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
     # completions may be distributed across processes
     rewards_per_func = gather(rewards_per_func)
@@ -87,7 +87,7 @@ We train Qwen2.5-1.5B-Instruct with GDPO and GRPO using trl for 1 epoch. Check [
 ```
 #### trl GDPO Implementation
 ```python
-    # line 1222 in gdpo_nvlab/trl-GDPO/trl-0.18.0-gdpo/trl/trainer/grpo_trainer.py
+    # line 1222 in trl-GDPO/trl-0.18.0-gdpo/trl/trainer/grpo_trainer.py
     # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
     # completions may be distributed across processes
     rewards_per_func = gather(rewards_per_func)
