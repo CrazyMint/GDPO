@@ -171,7 +171,15 @@ We train Qwen2.5-1.5B-Instruct with GDPO and GRPO using trl for 1 epoch. Check [
 ## 📝 Citation
 If you find GDPO useful, please star and cite it:
 ```bibtex
-
+@misc{liu2026gdpogrouprewarddecouplednormalization,
+      title={GDPO: Group reward-Decoupled Normalization Policy Optimization for Multi-reward RL Optimization}, 
+      author={Shih-Yang Liu and Xin Dong and Ximing Lu and Shizhe Diao and Peter Belcak and Mingjie Liu and Min-Hung Chen and Hongxu Yin and Yu-Chiang Frank Wang and Kwang-Ting Cheng and Yejin Choi and Jan Kautz and Pavlo Molchanov},
+      year={2026},
+      eprint={2601.05242},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2601.05242}, 
+}
 ```
 
 ## 📜 Licenses
