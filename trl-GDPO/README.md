@@ -31,7 +31,8 @@ export WANDB_API_KEY="Your API KEY"
 export HF_TOKEN="Your API KEY"
 export HF_HOME="YOU HF CACHE ADDRESS"
 ```
-For GRPO and GDPO training, please specify the configuration in GDPO/trl-GDPO/open-r1/recipes/Qwen2.5-1.5B-Instruct/gdpo_gsm8k/config.yaml and GDPO/trl-GDPO/open-r1/recipes/Qwen2.5-1.5B-Instruct/grpo_gsm8k/config.yaml
+For GRPO and GDPO training, please specify the configuration in GDPO/trl-GDPO/open-r1/recipes/Qwen2.5-1.5B-Instruct/gdpo_gsm8k/config.yaml and GDPO/trl-GDPO/open-r1/recipes/Qwen2.5-1.5B-Instruct/grpo_gsm8k/config.yaml.
+Make sure to update the output_dir field in each config.yaml file to the directory where you want the trained models to be saved.
 ```
 cd GDPO/trl-GDPO/open-r1
 bash run_gsm8k_gdpo.sh # For GDPO Training
