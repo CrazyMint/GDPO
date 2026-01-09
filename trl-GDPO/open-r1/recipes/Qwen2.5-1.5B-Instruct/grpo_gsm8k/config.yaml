@@ -30,7 +30,7 @@ max_completion_length: 1024
 max_steps: -1
 num_generations: 16
 num_train_epochs: 1
-output_dir: /lustre/fsw/portfolios/nvr/users/shihyangl/openr1_results/Qwen2.5-1.5B-gsm8k-GRPO-3-rewards-run3
+output_dir: ./trl-GDPO/Qwen2.5-1.5B-gsm8k-GRPO-3-rewards
 overwrite_output_dir: true
 per_device_eval_batch_size: 16
 per_device_train_batch_size: 16
@@ -38,7 +38,7 @@ push_to_hub: false
 report_to:
 - wandb
 wandb_project: "open-r1-gsm8k-3-rewards"
-run_name: "Qwen2.5-1.5B-gsm8k-GRPO-run3"
+run_name: "Qwen2.5-1.5B-gsm8k-GRPO"
 save_strategy: "steps"
 save_steps: 20
 save_total_limit: 1
