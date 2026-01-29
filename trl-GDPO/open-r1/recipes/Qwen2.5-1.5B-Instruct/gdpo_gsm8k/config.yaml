@@ -2,7 +2,7 @@
 model_name_or_path: Qwen/Qwen2.5-1.5B-Instruct
 model_revision: main
 torch_dtype: bfloat16
-attn_implementation: flash_attention_2
+attn_implementation: sdpa
 
 dataset_name: open-r1/OpenR1-Math-220k ## this is just placeholder
 dataset_prompt_column: problem ## this is just placeholder
@@ -30,7 +30,7 @@ max_completion_length: 1024
 max_steps: -1
 num_generations: 16
 num_train_epochs: 1
-output_dir: ./trl-GDPO/Qwen2.5-1.5B-gsm8k-GDPO-3-rewards
+output_dir: /data/sxw240003/GDPO/outputs/Qwen2.5-1.5B-gsm8k-GDPO-3-rewards
 overwrite_output_dir: true
 per_device_eval_batch_size: 16
 per_device_train_batch_size: 16

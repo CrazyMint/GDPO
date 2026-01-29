@@ -483,6 +483,52 @@ class GRPOTrainer(Trainer):
         else:
             self.apply_gdpo = False
 
+        # DGDO initialization
+        if args.apply_dgdo:
+            self.apply_dgdo = True
+            self.dgdo_beta = args.dgdo_beta
+            self.dgdo_epsilon = args.dgdo_epsilon
+            self.dgdo_min_weight = args.dgdo_min_weight
+            self.dgdo_invert = args.dgdo_invert
+            self.dgdo_importance_priors = args.dgdo_importance_priors
+            # Warmup and beta schedule
+            self.dgdo_warmup_steps = args.dgdo_warmup_steps
+            self.dgdo_beta_start = args.dgdo_beta_start
+            self.dgdo_beta_warmup_steps = args.dgdo_beta_warmup_steps
+            self._dgdo_step_count = 0
+            num_rewards = len(reward_funcs)
+
+            # Validate importance priors if provided
+            if self.dgdo_importance_priors is not None:
+                if len(self.dgdo_importance_priors) != num_rewards:
+                    raise ValueError(
+                        f"dgdo_importance_priors length ({len(self.dgdo_importance_priors)}) must match "
+                        f"number of reward functions ({num_rewards})"
+                    )
+                self.dgdo_importance_priors = torch.tensor(self.dgdo_importance_priors, dtype=torch.float32)
+
+            if args.dgdo_init_weights is not None:
+                if len(args.dgdo_init_weights) != num_rewards:
+                    raise ValueError(
+                        f"dgdo_init_weights length ({len(args.dgdo_init_weights)}) must match "
+                        f"number of reward functions ({num_rewards})"
+                    )
+                init_weights = torch.tensor(args.dgdo_init_weights, dtype=torch.float32)
+                self.dgdo_weights = init_weights / init_weights.sum()  # Normalize
+            else:
+                # Uniform initialization
+                self.dgdo_weights = torch.ones(num_rewards, dtype=torch.float32) / num_rewards
+            self._dgdo_initialized = False
+
+            # Log DGDO configuration
+            dgdo_mode = "invert" if self.dgdo_invert else "standard"
+            print(f"[DGDO] Initialized: mode={dgdo_mode}, beta={self.dgdo_beta}, epsilon={self.dgdo_epsilon}")
+            print(f"[DGDO] min_weight={self.dgdo_min_weight}, priors={self.dgdo_importance_priors}, init_weights={self.dgdo_weights.tolist()}")
+            print(f"[DGDO] warmup_steps={self.dgdo_warmup_steps}, beta_start={self.dgdo_beta_start}, beta_warmup_steps={self.dgdo_beta_warmup_steps}")
+        else:
+            self.apply_dgdo = False
+            self.dgdo_weights = None
+
         # Reward processing class
         if reward_processing_classes is None:
             reward_processing_classes = [None] * len(reward_funcs)
@@ -1001,6 +1047,129 @@ class GRPOTrainer(Trainer):
             inputs = self._generate_and_score_completions(generation_batch)
         return inputs
 
+    def _compute_dgdo_weights(
+        self,
+        rewards_per_func: torch.Tensor,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """
+        Compute dynamic weights for DGDO using instability-based weighting.
+
+        Phase 1: Compute batch statistics via Law of Total Variance
+        Phase 2: Compute instability (coefficient of variation) and update weights via EMA
+
+        Args:
+            rewards_per_func: Tensor of rewards per function, shape (B, K)
+            device: Device to place tensors on
+
+        Returns:
+            Tuple of (dynamic_weights, metrics_dict)
+        """
+        num_rewards = rewards_per_func.shape[1]
+        metrics = {}
+
+        # Increment step counter
+        self._dgdo_step_count += 1
+        current_step = self._dgdo_step_count
+        metrics["dgdo/step"] = float(current_step)
+
+        # WARMUP: Return uniform weights during warmup period
+        if self.dgdo_warmup_steps > 0 and current_step <= self.dgdo_warmup_steps:
+            uniform_weights = torch.ones(num_rewards, device=device) / num_rewards
+            metrics["dgdo/in_warmup"] = 1.0
+            metrics["dgdo/warmup_progress"] = current_step / self.dgdo_warmup_steps
+            for k in range(num_rewards):
+                metrics[f"dgdo/reward_{k}/ema_weight"] = uniform_weights[k].item()
+            weight_entropy = -torch.sum(uniform_weights * torch.log(uniform_weights + 1e-10))
+            metrics["dgdo/weight_entropy"] = weight_entropy.item()
+            return uniform_weights, metrics
+
+        metrics["dgdo/in_warmup"] = 0.0
+
+        # Filter NaN values
+        rewards_filtered = torch.nan_to_num(rewards_per_func)
+
+        # Phase 1: Compute global batch statistics using Law of Total Variance
+        instabilities = torch.zeros(num_rewards, device=device)
+
+        for k in range(num_rewards):
+            reward_k = rewards_filtered[:, k]
+
+            # Group-wise statistics
+            group_rewards = reward_k.view(-1, self.num_generations)  # (num_groups, G)
+            group_means = group_rewards.mean(dim=1)  # (num_groups,)
+            group_vars = group_rewards.var(dim=1, unbiased=False)  # (num_groups,)
+
+            # Global batch statistics via Law of Total Variance
+            # mu_batch = E[mu_group]
+            mu_batch = group_means.mean()
+
+            # sigma_batch = sqrt(E[Var_group] + Var[mu_group])
+            mean_within_var = group_vars.mean()
+            between_group_var = group_means.var(unbiased=False)
+            sigma_batch = torch.sqrt(mean_within_var + between_group_var + 1e-8)
+
+            # Instability: D_k = sigma_batch / (|mu_batch| + epsilon)
+            instabilities[k] = sigma_batch / (torch.abs(mu_batch) + self.dgdo_epsilon)
+
+            # Log per-reward statistics
+            metrics[f"dgdo/reward_{k}/mu_batch"] = mu_batch.item()
+            metrics[f"dgdo/reward_{k}/sigma_batch"] = sigma_batch.item()
+            metrics[f"dgdo/reward_{k}/instability"] = instabilities[k].item()
+
+        # Phase 2: Compute target weights
+        # Option: Invert instability logic (give MORE weight to stable rewards)
+        if self.dgdo_invert:
+            # Invert: low instability -> high weight
+            target_weights = torch.softmax(-instabilities, dim=0)
+            metrics["dgdo/mode"] = -1.0  # Marker for inverted mode
+        else:
+            # Standard: high instability -> high weight
+            target_weights = torch.softmax(instabilities, dim=0)
+            metrics["dgdo/mode"] = 1.0  # Marker for standard mode
+
+        # Option: Apply importance priors
+        if self.dgdo_importance_priors is not None:
+            priors = self.dgdo_importance_priors.to(device)
+            target_weights = target_weights * priors
+            target_weights = target_weights / target_weights.sum()  # Re-normalize
+            for k in range(num_rewards):
+                metrics[f"dgdo/reward_{k}/prior"] = priors[k].item()
+
+        # Option: Apply minimum weight constraint
+        if self.dgdo_min_weight is not None and self.dgdo_min_weight > 0:
+            target_weights = torch.clamp(target_weights, min=self.dgdo_min_weight)
+            target_weights = target_weights / target_weights.sum()  # Re-normalize
+            metrics["dgdo/min_weight_applied"] = self.dgdo_min_weight
+
+        # Compute effective beta (with optional schedule)
+        if self.dgdo_beta_start is not None and self.dgdo_beta_warmup_steps > 0:
+            steps_since_warmup = current_step - self.dgdo_warmup_steps
+            progress = min(steps_since_warmup / self.dgdo_beta_warmup_steps, 1.0)
+            effective_beta = self.dgdo_beta_start + progress * (self.dgdo_beta - self.dgdo_beta_start)
+        else:
+            effective_beta = self.dgdo_beta
+        metrics["dgdo/effective_beta"] = effective_beta
+
+        # EMA smoothing (FIXED: Always blend with previous weights, even on first step)
+        # This prevents the first batch's noisy target_weights from anchoring the trajectory
+        prev_weights = self.dgdo_weights.to(device)
+        new_weights = effective_beta * prev_weights + (1 - effective_beta) * target_weights
+
+        # Update stored weights
+        self.dgdo_weights = new_weights.detach().cpu()
+
+        # Log weight metrics
+        for k in range(num_rewards):
+            metrics[f"dgdo/reward_{k}/target_weight"] = target_weights[k].item()
+            metrics[f"dgdo/reward_{k}/ema_weight"] = new_weights[k].item()
+
+        # Log weight entropy (measure of uniformity)
+        weight_entropy = -torch.sum(new_weights * torch.log(new_weights + 1e-10))
+        metrics["dgdo/weight_entropy"] = weight_entropy.item()
+
+        return new_weights, metrics
+
     def _generate_and_score_completions(
         self, inputs: list[dict[str, Union[torch.Tensor, Any]]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
@@ -1220,13 +1389,11 @@ class GRPOTrainer(Trainer):
 
         ### only apply gdpo when having more than one reward
         if self.apply_gdpo and len(self.reward_weights) > 1:
-            print(f"Apply GDPO for multi-reward")
-
             ## Make sure every reward contain no nan value
             rewards_per_func_filter = torch.nan_to_num(rewards_per_func)
 
             all_reward_advantage = []
-            ## Calculate the mean and std of each reward group-wise separately
+            ## Phase 1: Calculate the mean and std of each reward group-wise separately (GDPO)
             for i in range(len(self.reward_weights)):
                 reward_i = rewards_per_func_filter[:,i]
                 each_reward_mean_grouped = reward_i.view(-1, self.num_generations).mean(dim=1)
@@ -1239,7 +1406,23 @@ class GRPOTrainer(Trainer):
                 all_reward_advantage.append(each_reward_advantage)
 
             combined_reward_advantage = torch.stack(all_reward_advantage, dim=1)
-            pre_bn_advantages = (combined_reward_advantage * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
+
+            ## Phase 2: Determine weights (dynamic for DGDO, static for GDPO)
+            if self.apply_dgdo:
+                # DGDO: Compute dynamic weights based on instability
+                effective_weights, dgdo_metrics = self._compute_dgdo_weights(rewards_per_func, device)
+                # Store DGDO metrics for logging later
+                self._dgdo_metrics = dgdo_metrics
+                if mode == "train":
+                    print(f"[DGDO] Dynamic weights: {[f'{w:.4f}' for w in effective_weights.tolist()]}")
+            else:
+                # GDPO: Use static weights
+                effective_weights = self.reward_weights.to(device)
+                self._dgdo_metrics = None
+                print(f"Apply GDPO for multi-reward")
+
+            ## Phase 3: Weighted combination and batch normalization
+            pre_bn_advantages = (combined_reward_advantage * effective_weights.unsqueeze(0)).nansum(dim=1)
 
             ## compute batch-wise mean and std
             bn_advantages_mean = pre_bn_advantages.mean()
@@ -1315,6 +1498,11 @@ class GRPOTrainer(Trainer):
             self._metrics[mode]["reward"].append(mean_grouped_rewards.mean().item())
             self._metrics[mode]["reward_std"].append(std_grouped_rewards.mean().item())
             self._metrics[mode]["frac_reward_zero_std"].append(is_std_zero.float().mean().item())
+
+            # Log DGDO metrics if enabled
+            if self.apply_dgdo and hasattr(self, '_dgdo_metrics') and self._dgdo_metrics is not None:
+                for key, value in self._dgdo_metrics.items():
+                    self._metrics[mode][key].append(value)
         else:
             self._metrics[mode]["reward"].append(mean_grouped_rewards.mean().item())
             self._metrics[mode]["reward_std"].append(std_grouped_rewards.mean().item())

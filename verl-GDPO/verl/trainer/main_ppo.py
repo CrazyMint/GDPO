@@ -17,7 +17,7 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 
 import torch
 from verl import DataProto
-from verl.utils.reward_score import gsm8k, math, multiply, countdown, rlla
+from verl.utils.reward_score import gsm8k, math, multiply, countdown, rlla, deepscale
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
 
@@ -32,6 +32,8 @@ def _select_rm_score_fn(data_source):
         return countdown.compute_score
     elif "rlla" in data_source:
         return rlla.compute_score
+    elif "deepscale" in data_source or "deepscaler" in data_source:
+        return deepscale.compute_score
     else:
         raise NotImplementedError
 

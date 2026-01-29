@@ -11,6 +11,14 @@ Please install vLLM and FlashAttention first, then install open-r1
 ```
 pip install vllm==0.8.5.post1
 pip install setuptools
+
+# Install CUDA toolkit
+conda install -c nvidia cuda-toolkit=12.4.1
+
+# Set environment variables
+export CUDA_HOME=$CONDA_PREFIX
+export PATH=$CUDA_HOME/bin:$PATH
+
 pip install flash-attn --no-build-isolation
 cd open-r1
 pip install -e ".[dev]"

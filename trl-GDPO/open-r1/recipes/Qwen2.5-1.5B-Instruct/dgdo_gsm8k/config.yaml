@@ -1,0 +1,89 @@
+# Model arguments
+model_name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+model_revision: main
+torch_dtype: bfloat16
+attn_implementation: sdpa
+
+dataset_name: open-r1/OpenR1-Math-220k
+dataset_prompt_column: problem
+
+# Training config
+bf16: true
+use_vllm: true
+do_eval: false
+gradient_accumulation_steps: 4
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+learning_rate: 5.0e-06
+log_completions: true
+log_level: info
+logging_first_step: true
+logging_steps: 1
+logging_strategy: steps
+lr_scheduler_type: cosine
+max_prompt_length: 512
+max_completion_length: 1024
+max_steps: -1
+num_generations: 16
+num_train_epochs: 1
+output_dir: /data/sxw240003/GDPO/outputs/Qwen2.5-1.5B-gsm8k-DGDO
+overwrite_output_dir: true
+per_device_eval_batch_size: 16
+per_device_train_batch_size: 16
+push_to_hub: false
+
+# ============================================
+# DAPO Techniques (inherited from GRPO)
+# ============================================
+# Higher asymmetric clipping (DAPO recommends 0.28)
+epsilon: 0.2
+epsilon_high: 0.28
+
+# Two-sided clipping upper bound (optional, try 2.0-3.0)
+# delta: 2.0
+
+# Mask overlong completions to prevent noise
+mask_truncated_completions: true
+
+# Token-mean loss (already default, but explicit)
+loss_type: bnpo
+
+# ============================================
+# GDPO + DGDO Configuration
+# ============================================
+# GDPO: Group-Decoupled normalization (required for DGDO)
+apply_gdpo: True
+
+# DGDO: Dynamic Gradient-Decoupled Optimization
+# Enables instability-based dynamic weighting for multi-reward training
+apply_dgdo: True
+
+# DGDO Hyperparameters
+# beta: EMA momentum for weight smoothing (higher = slower adaptation)
+#   - 0.9 (default): Moderate smoothing, adapts over ~10 steps
+#   - 0.95: Slower adaptation, more stable
+#   - 0.8: Faster adaptation, more responsive
+dgdo_beta: 0.9
+
+# epsilon: Stability constant for coefficient of variation
+#   - Prevents division by zero when reward mean is near 0
+#   - Smaller values preserve more signal
+dgdo_epsilon: 1.0e-06
+
+# dgdo_init_weights: Optional initial weights (default: uniform 1/K)
+# Uncomment to warm-start from known good weights:
+# dgdo_init_weights: [0.5, 0.3, 0.2]
+
+# ============================================
+# Logging & Checkpointing
+# ============================================
+report_to:
+- wandb
+wandb_project: "open-r1-gsm8k-3-rewards"
+run_name: "Qwen2.5-1.5B-gsm8k-DGDO"
+save_strategy: "steps"
+save_steps: 20
+save_total_limit: 1
+seed: 42
+warmup_ratio: 0.1

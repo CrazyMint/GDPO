@@ -31,6 +31,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import os
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from typing import Type, Dict
 import numpy as np
 from codetiming import Timer
 from omegaconf import OmegaConf, open_dict
+from tqdm import tqdm
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
@@ -128,7 +130,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1):
+def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, dgdo_state=None):
     # prepare response group
     # TODO: add other ways to estimate advantages
     if adv_estimator == 'gae':
@@ -201,6 +203,182 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch['advantages'] = advantages
         data.batch['returns'] = advantages
 
+    elif adv_estimator == 'dgdo':
+        # DGDO: Dynamic Gradient-Decoupled Optimization
+        # Extends GDPO with instability-based dynamic weighting
+
+        if dgdo_state is None:
+            raise ValueError("dgdo_state must be provided for DGDO advantage estimator")
+
+        # Get all reward tensors
+        token_level_scores_correctness = data.batch['token_level_scores_correctness']
+        token_level_scores_format = data.batch['token_level_scores_format']
+        token_level_scores_length = data.batch.get('token_level_scores_length', None)
+
+        # Shared variables
+        index = data.non_tensor_batch['uid']
+        responses = data.batch['responses']
+        response_length = responses.size(-1)
+        attention_mask = data.batch['attention_mask']
+        response_mask = attention_mask[:, -response_length:]
+        device = response_mask.device
+
+        # Normalize each reward independently (GDPO base)
+        correctness_adv, _ = core_algos.compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_scores_correctness,
+            eos_mask=response_mask,
+            index=index)
+        format_adv, _ = core_algos.compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_scores_format,
+            eos_mask=response_mask,
+            index=index)
+
+        reward_advantages = [correctness_adv, format_adv]
+        reward_names = ['correctness', 'format']
+
+        if token_level_scores_length is not None:
+            length_adv, _ = core_algos.compute_grpo_outcome_advantage(
+                token_level_rewards=token_level_scores_length,
+                eos_mask=response_mask,
+                index=index)
+            reward_advantages.append(length_adv)
+            reward_names.append('length')
+
+        num_rewards = len(reward_advantages)
+
+        # Increment step counter
+        dgdo_state['step_count'] = dgdo_state.get('step_count', 0) + 1
+        current_step = dgdo_state['step_count']
+
+        dgdo_metrics = {}
+        dgdo_metrics['dgdo/step'] = float(current_step)
+
+        # WARMUP: Return uniform weights during warmup period
+        dgdo_warmup_steps = dgdo_state.get('warmup_steps', 0)
+        if dgdo_warmup_steps > 0 and current_step <= dgdo_warmup_steps:
+            uniform_weights = torch.ones(num_rewards, device=device) / num_rewards
+            dgdo_metrics['dgdo/in_warmup'] = 1.0
+            dgdo_metrics['dgdo/warmup_progress'] = current_step / dgdo_warmup_steps
+            for k in range(num_rewards):
+                dgdo_metrics[f'dgdo/reward_{reward_names[k]}/weight'] = uniform_weights[k].item()
+            entropy = -(uniform_weights * torch.log(uniform_weights + 1e-8)).sum()
+            dgdo_metrics['dgdo/weight_entropy'] = entropy.item()
+            dgdo_state['metrics'] = dgdo_metrics
+
+            # Weighted combination with uniform weights
+            new_advantage = sum(w * adv for w, adv in zip(uniform_weights.tolist(), reward_advantages))
+            advantages = masked_whiten(new_advantage, response_mask) * response_mask
+            data.batch['advantages'] = advantages
+            data.batch['returns'] = advantages
+            return data  # Early return during warmup
+
+        dgdo_metrics['dgdo/in_warmup'] = 0.0
+
+        # Compute DGDO dynamic weights
+        dgdo_beta = dgdo_state.get('beta', 0.9)
+        dgdo_epsilon = dgdo_state.get('epsilon', 1e-6)
+
+        instabilities = torch.zeros(num_rewards, device=device)
+
+        for k, adv in enumerate(reward_advantages):
+            # Extract scalar scores from token-level advantages
+            scores = (adv * response_mask).sum(dim=-1) / response_mask.sum(dim=-1).clamp(min=1)
+
+            # Group by prompt index
+            unique_indices = list(set(index))
+            group_means = []
+            group_vars = []
+
+            for idx in unique_indices:
+                mask_indices = [i for i, x in enumerate(index) if x == idx]
+                if len(mask_indices) > 0:
+                    group_scores = scores[mask_indices]
+                    group_means.append(group_scores.mean())
+                    if len(mask_indices) > 1:
+                        group_vars.append(group_scores.var(unbiased=False))
+                    else:
+                        group_vars.append(torch.tensor(0.0, device=device))
+
+            group_means = torch.stack(group_means)
+            group_vars = torch.stack(group_vars)
+
+            # Law of Total Variance
+            mu_batch = group_means.mean()
+            mean_within_var = group_vars.mean()
+            between_group_var = group_means.var(unbiased=False)
+            sigma_batch = torch.sqrt(mean_within_var + between_group_var + 1e-8)
+
+            # Coefficient of variation (instability)
+            instabilities[k] = sigma_batch / (torch.abs(mu_batch) + dgdo_epsilon)
+
+            dgdo_metrics[f'dgdo/reward_{reward_names[k]}/mu_batch'] = mu_batch.item()
+            dgdo_metrics[f'dgdo/reward_{reward_names[k]}/sigma_batch'] = sigma_batch.item()
+            dgdo_metrics[f'dgdo/reward_{reward_names[k]}/instability'] = instabilities[k].item()
+
+        # Get variant options
+        dgdo_invert = dgdo_state.get('invert', False)
+        dgdo_min_weight = dgdo_state.get('min_weight', None)
+        dgdo_importance_priors = dgdo_state.get('importance_priors', None)
+
+        # Compute target weights (with optional invert)
+        if dgdo_invert:
+            # Give MORE weight to stable (low instability) rewards
+            target_weights = torch.softmax(-instabilities, dim=0)
+        else:
+            # Original: give more weight to unstable rewards
+            target_weights = torch.softmax(instabilities, dim=0)
+
+        # Apply importance priors if provided
+        if dgdo_importance_priors is not None:
+            priors = torch.tensor(dgdo_importance_priors, device=device, dtype=target_weights.dtype)
+            target_weights = target_weights * priors
+            target_weights = target_weights / target_weights.sum()
+
+        # Apply minimum weight constraint if provided
+        if dgdo_min_weight is not None and dgdo_min_weight > 0:
+            target_weights = torch.clamp(target_weights, min=dgdo_min_weight)
+            target_weights = target_weights / target_weights.sum()
+
+        # Compute effective beta (with optional schedule)
+        dgdo_beta_start = dgdo_state.get('beta_start', None)
+        dgdo_beta_warmup_steps = dgdo_state.get('beta_warmup_steps', 0)
+        if dgdo_beta_start is not None and dgdo_beta_warmup_steps > 0:
+            steps_since_warmup = current_step - dgdo_warmup_steps
+            progress = min(max(steps_since_warmup, 0) / dgdo_beta_warmup_steps, 1.0)
+            effective_beta = dgdo_beta_start + progress * (dgdo_beta - dgdo_beta_start)
+        else:
+            effective_beta = dgdo_beta
+        dgdo_metrics['dgdo/effective_beta'] = effective_beta
+
+        # EMA smoothing (always blend with previous weights)
+        if dgdo_state.get('weights') is None or not dgdo_state.get('initialized', False):
+            # Initialize with uniform weights, then blend
+            uniform_weights = torch.ones(num_rewards, device=device) / num_rewards
+            dgdo_state['weights'] = (effective_beta * uniform_weights + (1 - effective_beta) * target_weights).detach().cpu()
+            dgdo_state['initialized'] = True
+        else:
+            prev_weights = dgdo_state['weights'].to(device)
+            dgdo_state['weights'] = (effective_beta * prev_weights + (1 - effective_beta) * target_weights).detach().cpu()
+
+        current_weights = dgdo_state['weights'].to(device)
+
+        # Log final weights
+        for k in range(num_rewards):
+            dgdo_metrics[f'dgdo/reward_{reward_names[k]}/weight'] = current_weights[k].item()
+
+        # Weight entropy (uniformity measure)
+        entropy = -(current_weights * torch.log(current_weights + 1e-8)).sum()
+        dgdo_metrics['dgdo/weight_entropy'] = entropy.item()
+
+        # Store metrics for logging
+        dgdo_state['metrics'] = dgdo_metrics
+
+        # Weighted combination
+        new_advantage = sum(w * adv for w, adv in zip(current_weights.tolist(), reward_advantages))
+        advantages = masked_whiten(new_advantage, response_mask) * response_mask
+
+        data.batch['advantages'] = advantages
+        data.batch['returns'] = advantages
 
     else:
         raise NotImplementedError
@@ -423,6 +601,21 @@ class RayPPOTrainer(object):
                 raise NotImplementedError
         else:
             self.kl_ctrl = core_algos.FixedKLController(kl_coef=0.)
+
+        # DGDO state initialization
+        self.dgdo_weights = None
+        self.dgdo_initialized = False
+        self.dgdo_beta = config.algorithm.get('dgdo_beta', 0.9)
+        self.dgdo_epsilon = config.algorithm.get('dgdo_epsilon', 1e-6)
+        # DGDO variant options
+        self.dgdo_min_weight = config.algorithm.get('dgdo_min_weight', None)
+        self.dgdo_invert = config.algorithm.get('dgdo_invert', False)
+        self.dgdo_importance_priors = config.algorithm.get('dgdo_importance_priors', None)
+        # DGDO warmup and beta schedule
+        self.dgdo_warmup_steps = config.algorithm.get('dgdo_warmup_steps', 0)
+        self.dgdo_beta_start = config.algorithm.get('dgdo_beta_start', None)
+        self.dgdo_beta_warmup_steps = config.algorithm.get('dgdo_beta_warmup_steps', 0)
+        self._dgdo_step_count = 0
 
         self._create_dataloader()
 
@@ -689,9 +882,12 @@ class RayPPOTrainer(object):
         # we start from step 1
         self.global_steps += 1
 
+        # Create progress bar for training
+        pbar = tqdm(total=self.total_training_steps, initial=0, desc="Training", unit="step")
+
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
-                print(f'epoch {epoch}, step {self.global_steps}')
+                pbar.set_description(f"Epoch {epoch}")
                 metrics = {}
                 timing_raw = {}
 
@@ -759,11 +955,38 @@ class RayPPOTrainer(object):
                             batch.batch['token_level_rewards'] = batch.batch['token_level_scores']
 
                         # compute advantages, executed on the driver process
+                        # Prepare DGDO state if using DGDO
+                        dgdo_state = None
+                        if self.config.algorithm.adv_estimator == 'dgdo':
+                            dgdo_state = {
+                                'weights': self.dgdo_weights,
+                                'initialized': self.dgdo_initialized,
+                                'beta': self.dgdo_beta,
+                                'epsilon': self.dgdo_epsilon,
+                                'min_weight': self.dgdo_min_weight,
+                                'invert': self.dgdo_invert,
+                                'importance_priors': self.dgdo_importance_priors,
+                                # Warmup and beta schedule
+                                'warmup_steps': self.dgdo_warmup_steps,
+                                'beta_start': self.dgdo_beta_start,
+                                'beta_warmup_steps': self.dgdo_beta_warmup_steps,
+                                'step_count': self._dgdo_step_count,
+                            }
+
                         batch = compute_advantage(batch,
                                                   adv_estimator=self.config.algorithm.adv_estimator,
                                                   gamma=self.config.algorithm.gamma,
                                                   lam=self.config.algorithm.lam,
-                                                  num_repeat=self.config.actor_rollout_ref.rollout.n)
+                                                  num_repeat=self.config.actor_rollout_ref.rollout.n,
+                                                  dgdo_state=dgdo_state)
+
+                        # Update DGDO state and log metrics
+                        if self.config.algorithm.adv_estimator == 'dgdo' and dgdo_state is not None:
+                            self.dgdo_weights = dgdo_state.get('weights')
+                            self.dgdo_initialized = dgdo_state.get('initialized', False)
+                            self._dgdo_step_count = dgdo_state.get('step_count', self._dgdo_step_count)
+                            if 'metrics' in dgdo_state:
+                                metrics.update(dgdo_state['metrics'])
 
                     # update critic
                     if self.use_critic:
@@ -800,8 +1023,10 @@ class RayPPOTrainer(object):
                 logger.log(data=metrics, step=self.global_steps)
 
                 self.global_steps += 1
+                pbar.update(1)
 
                 if self.global_steps >= self.total_training_steps:
+                    pbar.close()
 
                     # perform validation after training
                     if self.val_reward_fn is not None:
@@ -809,3 +1034,5 @@ class RayPPOTrainer(object):
                         pprint(f'Final validation metrics: {val_metrics}')
                         logger.log(data=val_metrics, step=self.global_steps)
                     return
+
+        pbar.close()

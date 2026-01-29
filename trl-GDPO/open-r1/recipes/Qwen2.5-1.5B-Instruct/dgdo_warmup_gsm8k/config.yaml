@@ -1,0 +1,81 @@
+# Model arguments
+model_name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+model_revision: main
+torch_dtype: bfloat16
+attn_implementation: sdpa
+
+dataset_name: open-r1/OpenR1-Math-220k
+dataset_prompt_column: problem
+
+# Training config
+bf16: true
+use_vllm: true
+do_eval: false
+gradient_accumulation_steps: 4
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+learning_rate: 5.0e-06
+log_completions: true
+log_level: info
+logging_first_step: true
+logging_steps: 1
+logging_strategy: steps
+lr_scheduler_type: cosine
+max_prompt_length: 512
+max_completion_length: 1024
+max_steps: -1
+num_generations: 16
+num_train_epochs: 1
+output_dir: /data/sxw240003/GDPO/outputs/Qwen2.5-1.5B-gsm8k-DGDO-warmup
+overwrite_output_dir: true
+per_device_eval_batch_size: 16
+per_device_train_batch_size: 16
+push_to_hub: false
+
+# ============================================
+# DAPO Techniques (inherited from GRPO)
+# ============================================
+# epsilon: 0.2
+# epsilon_high: 0.28
+# mask_truncated_completions: true
+# loss_type: bnpo
+
+# ============================================
+# GDPO + DGDO Configuration
+# ============================================
+apply_gdpo: True
+apply_dgdo: True
+
+# DGDO Hyperparameters
+dgdo_beta: 0.9
+dgdo_epsilon: 1.0e-06
+
+# ============================================
+# DGDO Warmup & Min Weight Protection
+# ============================================
+# Warmup: Keep weights uniform for first N steps to allow model to stabilize
+# This prevents the first batch's noisy instability from anchoring weights
+dgdo_warmup_steps: 30
+
+# Beta Schedule: Start with lower beta (more responsive), increase over time
+# beta linearly increases from beta_start to beta over beta_warmup_steps
+dgdo_beta_start: 0.5
+dgdo_beta_warmup_steps: 200
+
+# Min Weight: Prevents any reward from being completely neglected
+# With 3 rewards, 0.15 ensures no reward drops below 15% weight
+dgdo_min_weight: 0.15
+
+# ============================================
+# Logging & Checkpointing
+# ============================================
+report_to:
+- wandb
+wandb_project: "open-r1-gsm8k-3-rewards"
+run_name: "Qwen2.5-1.5B-gsm8k-DGDO-warmup"
+save_strategy: "steps"
+save_steps: 20
+save_total_limit: 1
+seed: 42
+warmup_ratio: 0.1

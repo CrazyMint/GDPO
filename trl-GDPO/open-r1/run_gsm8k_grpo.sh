@@ -1,3 +1,4 @@
+source env_local.sh
 
 
 ACCELERATE_LOG_LEVEL=info \

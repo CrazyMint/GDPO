@@ -444,7 +444,75 @@ class GRPOConfig(TrainingArguments):
         metadata={
             "help": "Whether to apply GDPO: Group reward-Decoupled Normalization Policy Optimization for Multi-reward RL Optimization"
         },
-    )  
+    )
+    apply_dgdo: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to apply DGDO: Dynamic Gradient-Decoupled Optimization with instability-based "
+            "weight adaptation for multi-reward RL. Requires apply_gdpo=True."
+        },
+    )
+    dgdo_beta: float = field(
+        default=0.9,
+        metadata={
+            "help": "EMA momentum parameter for DGDO weight smoothing. Higher values (closer to 1.0) make "
+            "weights change more slowly. Typical range: 0.8-0.99."
+        },
+    )
+    dgdo_epsilon: float = field(
+        default=1e-6,
+        metadata={
+            "help": "Small constant to prevent division by zero in DGDO instability computation."
+        },
+    )
+    dgdo_init_weights: Optional[list[float]] = field(
+        default=None,
+        metadata={
+            "help": "Initial weights for DGDO. If None, weights are initialized uniformly as 1/K."
+        },
+    )
+    dgdo_min_weight: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "Minimum weight constraint for DGDO. If set, each reward weight is clamped to be >= this value. "
+            "Recommended: 1/(2*K) where K is number of rewards (e.g., 0.167 for 3 rewards)."
+        },
+    )
+    dgdo_invert: bool = field(
+        default=False,
+        metadata={
+            "help": "If True, invert DGDO instability logic: give MORE weight to stable (low instability) rewards "
+            "instead of unstable ones. This can help when the most important reward is also the most stable."
+        },
+    )
+    dgdo_importance_priors: Optional[list[float]] = field(
+        default=None,
+        metadata={
+            "help": "Prior importance weights for each reward. DGDO dynamic weights are multiplied by these priors "
+            "before normalization. Example: [2.0, 1.0, 1.0] gives 2x importance to the first reward."
+        },
+    )
+    dgdo_warmup_steps: int = field(
+        default=0,
+        metadata={
+            "help": "Number of steps to keep weights fixed at uniform before DGDO kicks in. "
+            "During warmup, instability is computed but weights stay uniform. Recommended: 30-100."
+        },
+    )
+    dgdo_beta_start: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "Initial beta for EMA when using beta schedule. Beta linearly increases from "
+            "dgdo_beta_start to dgdo_beta over dgdo_beta_warmup_steps. If None, dgdo_beta used throughout."
+        },
+    )
+    dgdo_beta_warmup_steps: int = field(
+        default=0,
+        metadata={
+            "help": "Steps over which beta increases from dgdo_beta_start to dgdo_beta. "
+            "Only used if dgdo_beta_start is set."
+        },
+    )
     scale_rewards: bool = field(
         default=True,
         metadata={
@@ -580,3 +648,13 @@ class GRPOConfig(TrainingArguments):
                 )
         if self.delta is not None and self.use_liger_loss:
             raise ValueError("Liger loss does not support two-sided GRPO loss yet.")
+
+        # DGDO validation
+        if self.apply_dgdo and not self.apply_gdpo:
+            raise ValueError(
+                "DGDO requires GDPO to be enabled. Please set `apply_gdpo=True` when using `apply_dgdo=True`."
+            )
+        if self.dgdo_beta < 0.0 or self.dgdo_beta > 1.0:
+            raise ValueError(f"dgdo_beta must be in [0, 1], got {self.dgdo_beta}.")
+        if self.dgdo_epsilon <= 0.0:
+            raise ValueError(f"dgdo_epsilon must be positive, got {self.dgdo_epsilon}.")
