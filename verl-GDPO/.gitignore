@@ -8,6 +8,21 @@
 **/playground
 **/wandb
 
+# Model weights and checkpoints
+**/*.safetensors
+**/*.bin
+**/pytorch_model*.bin
+**/model*.safetensors
+
+# Data files (use scripts/data/download_deepscaler.sh)
+data/
+!data/.gitkeep
+
+# Training results/checkpoints
+results/
+**/actor/
+**/ref/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

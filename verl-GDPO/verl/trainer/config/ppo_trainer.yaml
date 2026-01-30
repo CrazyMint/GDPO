@@ -84,6 +84,14 @@ actor_rollout_ref:
     do_sample: True
     # number of responses (i.e. num sample times)
     n: 1 # > 1 for grpo
+    # Validation sampling parameters
+    val_kwargs:
+      n: 1  # number of samples per prompt during validation
+      do_sample: False  # greedy by default for deterministic eval
+      temperature: 1.0
+      top_k: -1
+      top_p: 1.0
+      max_tokens: null  # null means use data.max_response_length; set lower for memory savings
 
 critic:
   strategy: fsdp
@@ -167,3 +175,9 @@ trainer:
   critic_warmup: 0
   default_hdfs_dir: null
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  # Checkpoint resume settings
+  resume_mode: auto  # Options: auto, disable, resume_path
+  resume_from_path: null  # Path to resume from (only used when resume_mode is "resume_path")
+  # Wandb settings
+  wandb_kwargs:
+    resume: allow  # Options: allow, must, never, auto

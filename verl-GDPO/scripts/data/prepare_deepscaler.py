@@ -15,13 +15,17 @@ from typing import Dict, List, Optional, Any
 
 import pandas as pd
 
-# Add GRPO path for deepscaler imports
-GRPO_PATH = "/people/cs/s/sxw240003/GRPO"
-if GRPO_PATH not in sys.path:
-    sys.path.insert(0, GRPO_PATH)
-
-from deepscaler.data.utils import load_dataset
-from deepscaler.data.dataset_types import TrainDataset, TestDataset
+# Try to import deepscaler - install via: pip install -e deepscaler/
+try:
+    from deepscaler.data.utils import load_dataset
+    from deepscaler.data.dataset_types import TrainDataset, TestDataset
+except ImportError:
+    print("Error: deepscaler package not found.")
+    print("Please install it first:")
+    print("  git clone https://github.com/agentica-project/deepscaler.git")
+    print("  pip install -e deepscaler/")
+    print("\nOr run: bash scripts/data/download_deepscaler.sh")
+    sys.exit(1)
 
 
 def make_map_fn(split: str):

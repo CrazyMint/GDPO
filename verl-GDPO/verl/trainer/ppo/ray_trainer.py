@@ -44,6 +44,7 @@ from codetiming import Timer
 from omegaconf import OmegaConf, open_dict
 from tqdm import tqdm
 from verl import DataProto
+from verl.trainer.ppo.metric_utils import process_validation_metrics
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
@@ -676,8 +677,18 @@ class RayPPOTrainer(object):
         format_tensor_lst = []
         correctness_tensor_lst = []
         length_tensor_lst = []
-        
+
         data_source_lst = []
+        uid_lst = []
+
+        # Get validation sampling config from val_kwargs (following ME's approach)
+        # Defaults: n=1 (single sample), do_sample=False (greedy)
+        val_kwargs = self.config.actor_rollout_ref.rollout.get('val_kwargs', {})
+        val_n = val_kwargs.get('n', 1)
+        val_do_sample = val_kwargs.get('do_sample', False)
+        val_temperature = val_kwargs.get('temperature', self.config.actor_rollout_ref.rollout.temperature)
+        val_max_tokens = val_kwargs.get('max_tokens', None)  # None means use default response_length
+
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
             # test_batch = test_batch.to('cuda')
@@ -686,14 +697,29 @@ class RayPPOTrainer(object):
             if self.config.reward_model.enable and test_batch[0].non_tensor_batch['reward_model']['style'] == 'model':
                 return {}
 
+            # Generate unique uid for each prompt BEFORE repeating
+            batch_size = len(test_batch)
+            if 'uid' not in test_batch.non_tensor_batch:
+                test_batch.non_tensor_batch['uid'] = np.array(
+                    [str(uuid.uuid4()) for _ in range(batch_size)], dtype=object
+                )
+
+            # Repeat test_batch BEFORE popping for generation (following ME's approach)
+            # This ensures batch sizes align after generation
+            test_batch = test_batch.repeat(repeat_times=val_n, interleave=True)
+
             test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'position_ids'])
             test_gen_batch.meta_info = {
                 'eos_token_id': self.tokenizer.eos_token_id,
                 'pad_token_id': self.tokenizer.pad_token_id,
                 'recompute_log_prob': False,
-                'do_sample': False,
+                'do_sample': val_do_sample,
                 'validate': True,
+                'temperature': val_temperature if val_do_sample else 1.0,
             }
+            # Add max_tokens override for validation if specified
+            if val_max_tokens is not None:
+                test_gen_batch.meta_info['max_tokens'] = val_max_tokens
 
             # pad to be divisible by dp_size
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
@@ -702,6 +728,7 @@ class RayPPOTrainer(object):
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
             print('validation generation end')
 
+            # Union test_batch with generated outputs (sizes now match)
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
@@ -712,39 +739,61 @@ class RayPPOTrainer(object):
             format_tensor_lst.append(format_tensor)
             correctness_tensor_lst.append(correctness_tensor)
             length_tensor_lst.append(length_tensor)
-            data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
+            # Get data_source and uid (already repeated in test_batch)
+            data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * len(test_batch)))
+            uid_lst.append(test_batch.non_tensor_batch['uid'])
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
         format_tensor = torch.cat(format_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
         correctness_tensor = torch.cat(correctness_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
         length_tensor = torch.cat(length_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
-        data_sources = np.concatenate(data_source_lst, axis=0)
-        
-        # evaluate test_score based on data source
-        data_source_reward = {}
-        data_source_format = {}
-        data_source_correctness = {}
-        data_source_length = {}
-        
-        for i in range(reward_tensor.shape[0]):
-            data_source = data_sources[i]
-            if data_source not in data_source_reward:
-                data_source_reward[data_source] = []
-                data_source_format[data_source] = []
-                data_source_correctness[data_source] = []
-                data_source_length[data_source] = []
-            
-            data_source_reward[data_source].append(reward_tensor[i].item())
-            data_source_format[data_source].append(format_tensor[i].item())
-            data_source_correctness[data_source].append(correctness_tensor[i].item())
-            data_source_length[data_source].append(length_tensor[i].item())
+        # Flatten lists of data sources and uids
+        data_sources = [ds for batch_ds in data_source_lst for ds in batch_ds]
+        sample_uids = [uid for batch_uids in uid_lst for uid in batch_uids]
+
+        # Build infos_dict for process_validation_metrics
+        infos_dict = {
+            'reward': reward_tensor.tolist(),
+            'correctness': correctness_tensor.tolist(),
+            'format': format_tensor.tolist(),
+            'length': length_tensor.tolist(),
+        }
+
+        # Compute @N metrics using process_validation_metrics
+        data_src2var2metric2val = process_validation_metrics(
+            data_sources=data_sources,
+            sample_uids=sample_uids,
+            infos_dict=infos_dict
+        )
 
         metric_dict = {}
-        for data_source, rewards in data_source_reward.items():
-            metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
-            metric_dict[f'val/test_format/{data_source}'] = np.mean(data_source_format[data_source])
-            metric_dict[f'val/test_correctness/{data_source}'] = np.mean(data_source_correctness[data_source])
-            metric_dict[f'val/test_length/{data_source}'] = np.mean(data_source_length[data_source])
+        for data_source, var2metric2val in data_src2var2metric2val.items():
+            # Determine core variable (correctness if available, else reward)
+            core_var = "correctness" if "correctness" in var2metric2val else "reward"
+            for var_name, metric2val in var2metric2val.items():
+                if not metric2val:
+                    continue
+                n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
+                for metric_name, metric_val in metric2val.items():
+                    # val-core: core metrics with mean/best/maj at max N
+                    if (
+                        (var_name == core_var)
+                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
+                        and (f"@{n_max}" in metric_name)
+                    ):
+                        metric_sec = "val-core"
+                    else:
+                        metric_sec = "val-aux"
+                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
+                    metric_dict[pfx] = metric_val
+
+        # Also keep the simple mean metrics for backward compatibility
+        for data_source in set(data_sources):
+            mask = data_sources == data_source
+            metric_dict[f'val/test_score/{data_source}'] = reward_tensor[mask].mean().item()
+            metric_dict[f'val/test_format/{data_source}'] = format_tensor[mask].mean().item()
+            metric_dict[f'val/test_correctness/{data_source}'] = correctness_tensor[mask].mean().item()
+            metric_dict[f'val/test_length/{data_source}'] = length_tensor[mask].mean().item()
 
         return metric_dict
 

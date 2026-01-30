@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# DeepscaleR DGDO Training Script
+# DeepscaleR DGDO Training Script - Qwen2.5-1.5B-Instruct
 
 source "$(dirname $0)/.env"
 
@@ -23,10 +23,11 @@ export N_GPUS=4
 export ROLLOUT_TP_SIZE=1
 export VLLM_ATTENTION_BACKEND=XFORMERS
 
-export DATA_DIR="$(dirname $0)/data/deepscaler"
-export BASE_MODEL="Qwen/Qwen2.5-1.5B-Instruct"
-export EXPERIMENT_NAME="qwen2.5-1.5B-deepscaler-DGDO"
-export CKPT_DIR="/data/sxw240003/GDPO/results/deepscaler_dgdo"
+# Paths - can be overridden via environment variables
+export DATA_DIR="${DATA_DIR:-$(dirname $0)/data/deepscaler}"
+export BASE_MODEL="${BASE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen2.5-1.5B-deepscaler-DGDO}"
+export CKPT_DIR="${CKPT_DIR:-./results/deepscaler_dgdo}"
 
 export RAY_USAGE_STATS_ENABLED=0
 export RAY_DISABLE_DOCKER_CPU_WARNING=1
@@ -42,9 +43,9 @@ python3 -u -m verl.trainer.main_ppo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/aime.parquet \
     data.train_batch_size=512 \
-    data.val_batch_size=128 \
+    data.val_batch_size=256 \
     data.max_prompt_length=1024 \
-    data.max_response_length=2048 \
+    data.max_response_length=4000 \
     actor_rollout_ref.model.path=$BASE_MODEL \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -62,9 +63,13 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP_SIZE \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.65 \
     actor_rollout_ref.rollout.temperature=1 \
     actor_rollout_ref.rollout.n=16 \
+    actor_rollout_ref.rollout.val_kwargs.n=1 \
+    actor_rollout_ref.rollout.val_kwargs.do_sample=False \
+    actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.max_tokens=4000 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.kl_ctrl.kl_coef=0.001 \
     algorithm.filter_groups.enable=True \
@@ -73,9 +78,11 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.logger=['console','wandb'] \
     trainer.project_name=DeepscaleR_DGDO \
     trainer.experiment_name=$EXPERIMENT_NAME \
+    trainer.resume_mode=auto \
+    trainer.wandb_kwargs.resume=allow \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
-    trainer.save_freq=10 \
+    trainer.save_freq=50 \
     trainer.test_freq=20 \
     trainer.default_local_dir=$CKPT_DIR \
-    trainer.total_epochs=30
+    trainer.total_epochs=7

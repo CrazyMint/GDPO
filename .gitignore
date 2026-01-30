@@ -1,0 +1,40 @@
+# Model weights and checkpoints
+**/*.pt
+**/*.ckpt
+**/*.safetensors
+**/*.bin
+**/pytorch_model*.bin
+**/model*.safetensors
+**/checkpoints/
+**/checkpoint-*/
+
+# Training outputs
+**/wandb/
+**/outputs/
+**/results/
+
+# Environment and secrets
+.env
+env_local.sh
+
+# Data files
+**/data/
+**/*.parquet
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Large files
+**/*.tar.gz
+**/*.zip
+
+# OS files
+.DS_Store
+*.swp
+
+# IDE
+.vscode/
+.idea/

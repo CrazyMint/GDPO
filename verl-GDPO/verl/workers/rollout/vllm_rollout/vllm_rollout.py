@@ -160,6 +160,12 @@ class vLLMRollout(BaseRollout):
             idx_list.append(_pre_process_inputs(self.pad_token_id, idx[i]))
 
         do_sample = prompts.meta_info.get('do_sample', True)
+
+        # Allow overriding max_tokens from meta_info (e.g., for validation with shorter responses)
+        max_tokens_override = prompts.meta_info.get('max_tokens', None)
+        if max_tokens_override is not None:
+            kwargs['max_tokens'] = max_tokens_override
+
         if not do_sample:
             kwargs = {
                 'best_of': 1,
@@ -169,6 +175,9 @@ class vLLMRollout(BaseRollout):
                 'temperature': 0,
                 'n': 1  # if greedy, only 1 response
             }
+            # Preserve max_tokens override even for greedy decoding
+            if max_tokens_override is not None:
+                kwargs['max_tokens'] = max_tokens_override
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
