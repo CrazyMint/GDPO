@@ -176,28 +176,38 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
 
 
     elif adv_estimator == 'gdpo':
-        ## only handle two reward now
+        ## handle correctness, length, and optionally format rewards
         token_level_scores_correctness = data.batch['token_level_scores_correctness']
         token_level_scores_format = data.batch['token_level_scores_format']
-        
-        # shared variables 
+        token_level_scores_length = data.batch.get('token_level_scores_length', None)
+
+        # shared variables
         index = data.non_tensor_batch['uid']
         responses = data.batch['responses']
         response_length = responses.size(-1)
         attention_mask = data.batch['attention_mask']
         response_mask = attention_mask[:, -response_length:]
 
-        ## handle correctness first
+        ## handle correctness
         correctness_normalized_score, _ = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_scores_correctness,
                                                                         eos_mask=response_mask,
                                                                         index=index)
 
-        ## handle format now
-        format_normalized_score, _ = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_scores_format,
-                                                                        eos_mask=response_mask,
-                                                                        index=index) 
-        
-        new_advantage = correctness_normalized_score + format_normalized_score
+        new_advantage = correctness_normalized_score
+
+        ## handle format (only if enabled, i.e. has non-zero values)
+        if token_level_scores_format.abs().sum() > 0:
+            format_normalized_score, _ = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_scores_format,
+                                                                            eos_mask=response_mask,
+                                                                            index=index)
+            new_advantage = new_advantage + format_normalized_score
+
+        ## handle length reward
+        if token_level_scores_length is not None:
+            length_normalized_score, _ = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_scores_length,
+                                                                            eos_mask=response_mask,
+                                                                            index=index)
+            new_advantage = new_advantage + length_normalized_score
 
         advantages = masked_whiten(new_advantage, response_mask) * response_mask
 
@@ -211,7 +221,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         if dgdo_state is None:
             raise ValueError("dgdo_state must be provided for DGDO advantage estimator")
 
-        # Get all reward tensors
+        # Get reward tensors
         token_level_scores_correctness = data.batch['token_level_scores_correctness']
         token_level_scores_format = data.batch['token_level_scores_format']
         token_level_scores_length = data.batch.get('token_level_scores_length', None)
@@ -224,18 +234,23 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         response_mask = attention_mask[:, -response_length:]
         device = response_mask.device
 
-        # Normalize each reward independently (GDPO base)
+        # Normalize each reward independently
         correctness_adv, _ = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=token_level_scores_correctness,
             eos_mask=response_mask,
             index=index)
-        format_adv, _ = core_algos.compute_grpo_outcome_advantage(
-            token_level_rewards=token_level_scores_format,
-            eos_mask=response_mask,
-            index=index)
 
-        reward_advantages = [correctness_adv, format_adv]
-        reward_names = ['correctness', 'format']
+        reward_advantages = [correctness_adv]
+        reward_names = ['correctness']
+
+        # Only include format if enabled (has non-zero values)
+        if token_level_scores_format.abs().sum() > 0:
+            format_adv, _ = core_algos.compute_grpo_outcome_advantage(
+                token_level_rewards=token_level_scores_format,
+                eos_mask=response_mask,
+                index=index)
+            reward_advantages.append(format_adv)
+            reward_names.append('format')
 
         if token_level_scores_length is not None:
             length_adv, _ = core_algos.compute_grpo_outcome_advantage(
@@ -823,6 +838,8 @@ class RayPPOTrainer(object):
         elif self.config.algorithm.adv_estimator == 'grpo' or self.config.algorithm.adv_estimator == 'grpo_no_std':
             self.use_critic = False
         elif self.config.algorithm.adv_estimator == 'gdpo':
+            self.use_critic = False
+        elif self.config.algorithm.adv_estimator == 'dgdo':
             self.use_critic = False
         else:
             raise NotImplementedError

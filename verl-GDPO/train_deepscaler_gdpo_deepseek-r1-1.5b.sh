@@ -76,7 +76,7 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.wandb_kwargs.resume=allow \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
-    trainer.save_freq=50 \
+    trainer.save_freq=20 \
     trainer.test_freq=20 \
     trainer.default_local_dir=$CKPT_DIR \
     trainer.total_epochs=7
