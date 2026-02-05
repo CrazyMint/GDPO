@@ -824,6 +824,8 @@ class RayPPOTrainer(object):
             self.use_critic = False
         elif self.config.algorithm.adv_estimator == 'gdpo':
             self.use_critic = False
+        elif self.config.algorithm.adv_estimator == 'dgdo':
+            self.use_critic = False
         else:
             raise NotImplementedError
 

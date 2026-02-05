@@ -16,6 +16,9 @@
 
 # DeepscaleR DGDO Training Script - DeepSeek-R1-Distill-Qwen-1.5B
 
+# Load CUDA for Flash Attention and B200 support
+module load cuda/12.4.1
+
 source "$(dirname $0)/.env"
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3
@@ -29,14 +32,20 @@ export BASE_MODEL="${BASE_MODEL:-deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-deepseek-r1-1.5B-deepscaler-DGDO}"
 export CKPT_DIR="${CKPT_DIR:-./results/deepscaler_dgdo_deepseek-r1-1.5b}"
 
+# Ray configuration
 export RAY_USAGE_STATS_ENABLED=0
-export RAY_DISABLE_DOCKER_CPU_WARNING=1
+export RAY_TMPDIR="${RAY_TMPDIR:-$HOME/ray_tmp}"
+mkdir -p "$RAY_TMPDIR"
+
+# Clean up any existing Ray instances
+ray stop 2>/dev/null || true
+sleep 1
 
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=dgdo \
     algorithm.dgdo_beta=0.9 \
     algorithm.dgdo_epsilon=1e-6 \
-    algorithm.dgdo_warmup_steps=30 \
+    algorithm.dgdo_warmup_steps=10 \
     algorithm.dgdo_beta_start=0.5 \
     algorithm.dgdo_beta_warmup_steps=200 \
     algorithm.dgdo_min_weight=0.15 \
@@ -70,6 +79,8 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.do_sample=False \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.max_tokens=4000 \
+    actor_rollout_ref.rollout.enforce_eager=False \
+    actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.kl_ctrl.kl_coef=0.001 \
     algorithm.filter_groups.enable=True \
