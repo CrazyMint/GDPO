@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# DeepscaleR GDPO Training Script - DeepSeek-R1-Distill-Qwen-1.5B
+# DeepscaleR GRPO Training Script - DeepSeek-R1-Distill-Qwen-1.5B
 
 source "$(dirname $0)/.env"
 
@@ -26,14 +26,14 @@ export VLLM_ATTENTION_BACKEND=XFORMERS
 # Paths - can be overridden via environment variables
 export DATA_DIR="${DATA_DIR:-$(dirname $0)/data/deepscaler}"
 export BASE_MODEL="${BASE_MODEL:-deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B}"
-export EXPERIMENT_NAME="${EXPERIMENT_NAME:-deepseek-r1-1.5B-deepscaler-GDPO}"
-export CKPT_DIR="${CKPT_DIR:-./results/deepscaler_gdpo_deepseek-r1-1.5b}"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-deepseek-r1-1.5B-deepscaler-GRPO}"
+export CKPT_DIR="${CKPT_DIR:-./results/deepscaler_grpo_deepseek-r1-1.5b}"
 
 export RAY_USAGE_STATS_ENABLED=0
 export RAY_DISABLE_DOCKER_CPU_WARNING=1
 
 python3 -u -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=gdpo \
+    algorithm.adv_estimator=grpo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/aime.parquet \
     data.train_batch_size=512 \
@@ -76,7 +76,7 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.wandb_kwargs.resume=allow \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
-    trainer.save_freq=20 \
+    trainer.save_freq=50 \
     trainer.test_freq=20 \
     trainer.default_local_dir=$CKPT_DIR \
     trainer.total_epochs=7
