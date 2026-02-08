@@ -202,8 +202,8 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                                                                             index=index)
             new_advantage = new_advantage + format_normalized_score
 
-        ## handle length reward
-        if token_level_scores_length is not None:
+        ## handle length reward (only if enabled, i.e. has non-zero values)
+        if token_level_scores_length is not None and token_level_scores_length.abs().sum() > 0:
             length_normalized_score, _ = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_scores_length,
                                                                             eos_mask=response_mask,
                                                                             index=index)
@@ -252,7 +252,8 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             reward_advantages.append(format_adv)
             reward_names.append('format')
 
-        if token_level_scores_length is not None:
+        # Only include length if enabled (has non-zero values)
+        if token_level_scores_length is not None and token_level_scores_length.abs().sum() > 0:
             length_adv, _ = core_algos.compute_grpo_outcome_advantage(
                 token_level_rewards=token_level_scores_length,
                 eos_mask=response_mask,
@@ -350,10 +351,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             target_weights = target_weights * priors
             target_weights = target_weights / target_weights.sum()
 
-        # Apply minimum weight constraint if provided
-        if dgdo_min_weight is not None and dgdo_min_weight > 0:
-            target_weights = torch.clamp(target_weights, min=dgdo_min_weight)
-            target_weights = target_weights / target_weights.sum()
+        # Note: min_weight is applied AFTER EMA smoothing (see below)
 
         # Compute effective beta (with optional schedule)
         dgdo_beta_start = dgdo_state.get('beta_start', None)
@@ -377,6 +375,11 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             dgdo_state['weights'] = (effective_beta * prev_weights + (1 - effective_beta) * target_weights).detach().cpu()
 
         current_weights = dgdo_state['weights'].to(device)
+
+        # Apply minimum weight constraint AFTER EMA smoothing
+        if dgdo_min_weight is not None and dgdo_min_weight > 0:
+            current_weights = torch.clamp(current_weights, min=dgdo_min_weight)
+            current_weights = current_weights / current_weights.sum()
 
         # Log final weights
         for k in range(num_rewards):
