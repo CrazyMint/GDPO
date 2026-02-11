@@ -34,7 +34,7 @@ export SCHEDULELENGTH=0
 export DATA_DIR="verl-GDPO/dataset/rlla_4k"
 export BASE_MODEL="Qwen/Qwen2.5-1.5B-Instruct"
 export EXPERIMENT_NAME="qwen2.5-1.5B-DGDO-tool"
-export CKPT_DIR="verl-GDPO/results/dgdo"
+export CKPT_DIR="/data/sxw240003/GDPO/results/dgdo"
 
 export RAY_USAGE_STATS_ENABLED=0
 export RAY_DISABLE_DOCKER_CPU_WARNING=1

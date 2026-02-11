@@ -27,7 +27,7 @@ export VLLM_ATTENTION_BACKEND=XFORMERS
 export DATA_DIR="${DATA_DIR:-$(dirname $0)/data/deepscaler}"
 export BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3-4B}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen3-4B-deepscaler-DGDO}"
-export CKPT_DIR="${CKPT_DIR:-./results/deepscaler_dgdo_qwen3-4b}"
+export CKPT_DIR="${CKPT_DIR:-/data/sxw240003/GDPO/results/deepscaler_dgdo_qwen3-4b}"
 
 export RAY_USAGE_STATS_ENABLED=0
 export RAY_DISABLE_DOCKER_CPU_WARNING=1

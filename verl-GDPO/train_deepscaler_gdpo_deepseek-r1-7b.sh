@@ -27,7 +27,7 @@ export VLLM_ATTENTION_BACKEND=XFORMERS
 export DATA_DIR="${DATA_DIR:-$(dirname $0)/data/deepscaler}"
 export BASE_MODEL="${BASE_MODEL:-deepseek-ai/DeepSeek-R1-Distill-Qwen-7B}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-deepseek-r1-7B-deepscaler-GDPO}"
-export CKPT_DIR="${CKPT_DIR:-./results/deepscaler_gdpo_deepseek-r1-7b}"
+export CKPT_DIR="${CKPT_DIR:-/data/sxw240003/GDPO/results/deepscaler_gdpo_deepseek-r1-7b}"
 
 export RAY_USAGE_STATS_ENABLED=0
 export RAY_DISABLE_DOCKER_CPU_WARNING=1
