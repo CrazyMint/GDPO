@@ -37,19 +37,21 @@ export SCHEDULELENGTH=0
 export DATA_DIR="${DATA_DIR:-$(dirname $0)/data/rlla_4k}"
 export BASE_MODEL="${BASE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen2.5-1.5B-DGDO-tool}"
-export CKPT_DIR="${CKPT_DIR:-./results/toolrl_dgdo_qwen2.5-1.5b}"
+export CKPT_DIR="${CKPT_DIR:-/data/sxw240003/GDPO/results/toolrl_dgdo_qwen2.5-1.5b}"
 
 export RAY_USAGE_STATS_ENABLED=0
 export RAY_DISABLE_DOCKER_CPU_WARNING=1
+
+# in the most recent exp, i see format score very low. can we make sure that if the mean is very low, the weight shouldbt be too low regardless of how small its std is?
 
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=dgdo \
     algorithm.dgdo_beta=0.9 \
     algorithm.dgdo_epsilon=1e-6 \
-    algorithm.dgdo_warmup_steps=20 \
-    algorithm.dgdo_beta_start=0.5 \
-    algorithm.dgdo_beta_warmup_steps=200 \
-    algorithm.dgdo_min_weight=0.15 \
+    algorithm.dgdo_warmup_steps=10 \
+    algorithm.dgdo_beta_start=0.8 \
+    algorithm.dgdo_beta_warmup_steps=100 \
+    algorithm.dgdo_min_weight=0.25 \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \
     data.train_batch_size=512 \
@@ -78,7 +80,7 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.logger=['console','wandb'] \
     trainer.project_name=ToolRL_GDPO \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.resume_mode=auto \
+    trainer.resume_mode=disabled \
     trainer.wandb_kwargs.resume=allow \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \

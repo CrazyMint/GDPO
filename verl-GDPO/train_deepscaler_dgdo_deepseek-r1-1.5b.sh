@@ -17,7 +17,7 @@
 # DeepscaleR DGDO Training Script - DeepSeek-R1-Distill-Qwen-1.5B
 
 # Load CUDA for Flash Attention and B200 support
-module load cuda/12.4.1
+# module load cuda/12.4.1
 
 source "$(dirname $0)/.env"
 
@@ -30,23 +30,19 @@ export VLLM_ATTENTION_BACKEND=XFORMERS
 export DATA_DIR="${DATA_DIR:-$(dirname $0)/data/deepscaler}"
 export BASE_MODEL="${BASE_MODEL:-deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-deepseek-r1-1.5B-deepscaler-DGDO}"
-export CKPT_DIR="${CKPT_DIR:-./results/deepscaler_dgdo_deepseek-r1-1.5b}"
+export CKPT_DIR="${CKPT_DIR:-/data/sxw240003/GDPO/results/deepscaler_dgdo_deepseek-r1-1.5b}"
 
 # Ray configuration
 export RAY_USAGE_STATS_ENABLED=0
-export RAY_TMPDIR="${RAY_TMPDIR:-$HOME/ray_tmp}"
-mkdir -p "$RAY_TMPDIR"
-
-# Clean up any existing Ray instances
-ray stop 2>/dev/null || true
-sleep 1
+# export WANDB_RUN_ID=w9td3lsg
+# export WANDB_RESUME=allow
 
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=dgdo \
     algorithm.dgdo_beta=0.9 \
     algorithm.dgdo_epsilon=1e-6 \
     algorithm.dgdo_warmup_steps=20 \
-    algorithm.dgdo_beta_start=0.5 \
+    algorithm.dgdo_beta_start=0.8 \
     algorithm.dgdo_beta_warmup_steps=200 \
     algorithm.dgdo_min_weight=0.15 \
     data.train_files=$DATA_DIR/train.parquet \
@@ -79,8 +75,6 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.do_sample=False \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.max_tokens=4000 \
-    actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.kl_ctrl.kl_coef=0.001 \
     algorithm.filter_groups.enable=True \
@@ -89,11 +83,11 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.logger=['console','wandb'] \
     trainer.project_name=DeepscaleR_GDPO \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.resume_mode=auto \
+    trainer.resume_mode=disable \
     trainer.wandb_kwargs.resume=allow \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
-    trainer.save_freq=20 \
+    trainer.save_freq=10 \
     trainer.test_freq=20 \
     trainer.default_local_dir=$CKPT_DIR \
     trainer.total_epochs=7
