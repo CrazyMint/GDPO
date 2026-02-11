@@ -503,6 +503,78 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_param:
             offload_fsdp_param_and_grad(module=self.actor_module_fsdp, offload_grad=self._is_offload_grad)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def save_optimizer_checkpoint(self, local_path):
+        """Save optimizer and LR scheduler state (sharded per rank)."""
+        assert self._is_actor
+        import torch
+        import torch.distributed
+
+        os.makedirs(local_path, exist_ok=True)
+
+        # Each rank saves its own sharded optimizer state
+        optim_state = self.actor_optimizer.state_dict()
+        # Move all tensors to CPU for saving
+        cpu_optim_state = {}
+        for k, v in optim_state.items():
+            if k == 'state':
+                cpu_optim_state['state'] = {}
+                for param_id, param_state in v.items():
+                    cpu_optim_state['state'][param_id] = {
+                        sk: sv.cpu() if isinstance(sv, torch.Tensor) else sv
+                        for sk, sv in param_state.items()
+                    }
+            else:
+                cpu_optim_state[k] = v
+        torch.save(cpu_optim_state, os.path.join(local_path, f'optimizer_rank_{self.rank}.pt'))
+
+        # Save LR scheduler state
+        lr_state = self.actor_lr_scheduler.state_dict()
+        torch.save(lr_state, os.path.join(local_path, f'lr_scheduler_rank_{self.rank}.pt'))
+
+        if self.rank == 0:
+            print(f'Saved optimizer checkpoint to {local_path}')
+
+        torch.distributed.barrier()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def load_optimizer_checkpoint(self, local_path):
+        """Load optimizer and LR scheduler state (sharded per rank)."""
+        assert self._is_actor
+        import torch
+        import torch.distributed
+
+        optim_path = os.path.join(local_path, f'optimizer_rank_{self.rank}.pt')
+        lr_path = os.path.join(local_path, f'lr_scheduler_rank_{self.rank}.pt')
+
+        if os.path.exists(optim_path):
+            # Load optimizer to CPU first
+            if self._is_offload_optimizer:
+                load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
+
+            optim_state = torch.load(optim_path, map_location='cpu')
+            self.actor_optimizer.load_state_dict(optim_state)
+            del optim_state
+
+            if self._is_offload_optimizer:
+                offload_fsdp_optimizer(optimizer=self.actor_optimizer)
+
+            if self.rank == 0:
+                print(f'Loaded optimizer state from {local_path}')
+        else:
+            if self.rank == 0:
+                print(f'Warning: No optimizer checkpoint found at {optim_path}')
+
+        if os.path.exists(lr_path):
+            lr_state = torch.load(lr_path, map_location='cpu')
+            self.actor_lr_scheduler.load_state_dict(lr_state)
+            del lr_state
+            if self.rank == 0:
+                print(f'Loaded LR scheduler state from {local_path}')
+
+        torch.distributed.barrier()
+        torch.cuda.empty_cache()
+
 
 class CriticWorker(Worker):
 
