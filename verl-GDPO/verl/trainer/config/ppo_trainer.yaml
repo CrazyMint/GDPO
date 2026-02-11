@@ -153,6 +153,8 @@ algorithm:
   kl_ctrl:
     type: fixed
     kl_coef: 0.001
+  # GDPO static weights for [correctness, format, length] (only used when adv_estimator=gdpo)
+  gdpo_weights: null  # e.g. [0.8, 0.2] for correctness=0.8, format=0.2
   # DGDO hyperparameters (only used when adv_estimator=dgdo)
   dgdo_beta: 0.9      # EMA momentum for weight smoothing (0.8-0.99)
   dgdo_epsilon: 1e-6  # Stability constant for instability computation

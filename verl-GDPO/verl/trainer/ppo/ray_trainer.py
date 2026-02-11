@@ -131,7 +131,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, dgdo_state=None):
+def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, dgdo_state=None, gdpo_weights=None):
     # prepare response group
     # TODO: add other ways to estimate advantages
     if adv_estimator == 'gae':
@@ -193,21 +193,26 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                                                                         eos_mask=response_mask,
                                                                         index=index)
 
-        new_advantage = correctness_normalized_score
+        # Apply static weights if provided: gdpo_weights=[correctness_weight, format_weight, length_weight]
+        w_correctness = gdpo_weights[0] if gdpo_weights is not None else 1.0
+        w_format = gdpo_weights[1] if gdpo_weights is not None and len(gdpo_weights) > 1 else 1.0
+        w_length = gdpo_weights[2] if gdpo_weights is not None and len(gdpo_weights) > 2 else 1.0
+
+        new_advantage = w_correctness * correctness_normalized_score
 
         ## handle format (only if enabled, i.e. has non-zero values)
         if token_level_scores_format.abs().sum() > 0:
             format_normalized_score, _ = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_scores_format,
                                                                             eos_mask=response_mask,
                                                                             index=index)
-            new_advantage = new_advantage + format_normalized_score
+            new_advantage = new_advantage + w_format * format_normalized_score
 
         ## handle length reward (only if enabled, i.e. has non-zero values)
         if token_level_scores_length is not None and token_level_scores_length.abs().sum() > 0:
             length_normalized_score, _ = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_scores_length,
                                                                             eos_mask=response_mask,
                                                                             index=index)
-            new_advantage = new_advantage + length_normalized_score
+            new_advantage = new_advantage + w_length * length_normalized_score
 
         advantages = masked_whiten(new_advantage, response_mask) * response_mask
 
@@ -621,6 +626,9 @@ class RayPPOTrainer(object):
         else:
             self.kl_ctrl = core_algos.FixedKLController(kl_coef=0.)
 
+        # GDPO static weights
+        self.gdpo_weights = config.algorithm.get('gdpo_weights', None)
+
         # DGDO state initialization
         self.dgdo_weights = None
         self.dgdo_initialized = False
@@ -906,6 +914,24 @@ class RayPPOTrainer(object):
                 # self.config.trainer.default_hdfs_dir, 'critic')
             self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
 
+        # Save optimizer and LR scheduler state (sharded per rank)
+        optim_local_path = os.path.join(self.config.trainer.default_local_dir, 'optimizer',
+                                        f'global_step_{self.global_steps}')
+        self.actor_rollout_wg.save_optimizer_checkpoint(optim_local_path)
+
+        # Save training state on driver (DGDO state, global_steps, etc.)
+        training_state = {
+            'global_steps': self.global_steps,
+            'dgdo_weights': self.dgdo_weights.cpu() if self.dgdo_weights is not None else None,
+            'dgdo_initialized': self.dgdo_initialized,
+            'dgdo_step_count': self._dgdo_step_count,
+        }
+        state_path = os.path.join(self.config.trainer.default_local_dir, 'training_state',
+                                  f'global_step_{self.global_steps}')
+        os.makedirs(state_path, exist_ok=True)
+        torch.save(training_state, os.path.join(state_path, 'training_state.pt'))
+        pprint(f'Saved training state to {state_path}')
+
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix='global_seqlen'):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
         attention_mask = batch.batch['attention_mask']
@@ -937,7 +963,47 @@ class RayPPOTrainer(object):
                           default_backend=self.config.trainer.logger,
                           config=OmegaConf.to_container(self.config, resolve=True))
 
+        # Detect resumed step from checkpoint directory
         self.global_steps = 0
+        resume_step = 0
+        if self.config.trainer.get('resume_mode', 'disable') == 'auto':
+            ckpt_actor_dir = os.path.join(self.config.trainer.default_local_dir, 'actor')
+            if os.path.exists(ckpt_actor_dir):
+                import re
+                steps = [int(re.search(r'global_step_(\d+)', d).group(1))
+                         for d in os.listdir(ckpt_actor_dir)
+                         if re.search(r'global_step_(\d+)', d)]
+                if steps:
+                    resume_step = max(steps)
+                    pprint(f'Resuming from global_step_{resume_step}')
+
+        self.global_steps = resume_step
+
+        # Load optimizer and training state if resuming
+        if resume_step > 0:
+            # Load optimizer and LR scheduler state
+            optim_path = os.path.join(self.config.trainer.default_local_dir, 'optimizer',
+                                      f'global_step_{resume_step}')
+            if os.path.exists(optim_path):
+                pprint(f'Loading optimizer state from step {resume_step}...')
+                self.actor_rollout_wg.load_optimizer_checkpoint(optim_path)
+                pprint(f'Optimizer state loaded successfully')
+            else:
+                pprint(f'Warning: No optimizer checkpoint found at {optim_path}')
+
+            # Load training state (DGDO state, etc.)
+            state_path = os.path.join(self.config.trainer.default_local_dir, 'training_state',
+                                      f'global_step_{resume_step}', 'training_state.pt')
+            if os.path.exists(state_path):
+                training_state = torch.load(state_path, map_location='cpu')
+                self.dgdo_weights = training_state.get('dgdo_weights')
+                self.dgdo_initialized = training_state.get('dgdo_initialized', False)
+                self._dgdo_step_count = training_state.get('dgdo_step_count', 0)
+                pprint(f'Loaded training state from step {resume_step}: '
+                       f'dgdo_initialized={self.dgdo_initialized}, '
+                       f'dgdo_step_count={self._dgdo_step_count}')
+            else:
+                pprint(f'Warning: No training state found at {state_path}')
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -952,10 +1018,16 @@ class RayPPOTrainer(object):
         self.global_steps += 1
 
         # Create progress bar for training
-        pbar = tqdm(total=self.total_training_steps, initial=0, desc="Training", unit="step")
+        pbar = tqdm(total=self.total_training_steps, initial=resume_step, desc="Training", unit="step")
 
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            for batch_idx, batch_dict in enumerate(self.train_dataloader):
+                # Skip batches already processed before resume
+                if resume_step > 0 and self.global_steps <= resume_step:
+                    self.global_steps += 1
+                    pbar.update(1)
+                    continue
+
                 pbar.set_description(f"Epoch {epoch}")
                 metrics = {}
                 timing_raw = {}
@@ -1009,10 +1081,20 @@ class RayPPOTrainer(object):
                         reward_tensor, format_tensor, correctness_tensor, length_tensor = self.reward_fn(batch, self.global_steps)
                         ## reward_tensor = format_tensor + correctness_tensor + length_tensor
 
-                        batch.batch['token_level_scores'] = reward_tensor
                         batch.batch['token_level_scores_format'] = format_tensor
                         batch.batch['token_level_scores_correctness'] = correctness_tensor
                         batch.batch['token_level_scores_length'] = length_tensor
+
+                        # Apply static weights to re-combine rewards (for GRPO static)
+                        if self.gdpo_weights is not None and self.config.algorithm.adv_estimator in ('grpo', 'grpo_no_std'):
+                            w_c = self.gdpo_weights[0] if len(self.gdpo_weights) > 0 else 1.0
+                            w_f = self.gdpo_weights[1] if len(self.gdpo_weights) > 1 else 1.0
+                            w_l = self.gdpo_weights[2] if len(self.gdpo_weights) > 2 else 1.0
+                            reward_tensor = w_c * correctness_tensor + w_f * format_tensor
+                            if length_tensor is not None:
+                                reward_tensor = reward_tensor + w_l * length_tensor
+
+                        batch.batch['token_level_scores'] = reward_tensor
 
                         # compute rewards. apply_kl_penalty if available
                         if not self.config.actor_rollout_ref.actor.use_kl_loss:
@@ -1047,7 +1129,8 @@ class RayPPOTrainer(object):
                                                   gamma=self.config.algorithm.gamma,
                                                   lam=self.config.algorithm.lam,
                                                   num_repeat=self.config.actor_rollout_ref.rollout.n,
-                                                  dgdo_state=dgdo_state)
+                                                  dgdo_state=dgdo_state,
+                                                  gdpo_weights=self.gdpo_weights)
 
                         # Update DGDO state and log metrics
                         if self.config.algorithm.adv_estimator == 'dgdo' and dgdo_state is not None:
