@@ -32,11 +32,11 @@ export CKPT_DIR="${CKPT_DIR:-/data/sxw240003/GDPO/results/math_gdpo_condlen_deep
 export RAY_USAGE_STATS_ENABLED=0
 export RAY_DISABLE_DOCKER_CPU_WARNING=1
 
-# Reward configuration
-export MATH_CORRECT_REWARD=1.0
-export MATH_LENGTH_REWARD=1.0
-export MATH_LENGTH_THRESHOLD=2000
-export MATH_LENGTH_MODE=conditioned
+# Reward configuration (math dataset uses data_source="deepscaler" → reads DEEPSCALE_* env vars)
+export DEEPSCALE_CORRECT_REWARD=1.0
+export DEEPSCALE_LENGTH_REWARD=1.0
+export DEEPSCALE_LENGTH_THRESHOLD=2000
+export DEEPSCALE_LENGTH_MODE=conditioned
 
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gdpo \

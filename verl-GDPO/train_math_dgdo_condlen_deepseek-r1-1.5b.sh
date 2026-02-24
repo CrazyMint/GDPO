@@ -34,13 +34,13 @@ export BASE_MODEL="${BASE_MODEL:-deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-deepseek-r1-1.5B-math-DGDO-condlen}"
 export CKPT_DIR="${CKPT_DIR:-/data/sxw240003/GDPO/results/math_dgdo_condlen_deepseek-r1-1.5b}"
 
-# Reward configuration
+# Reward configuration (math dataset uses data_source="deepscaler" → reads DEEPSCALE_* env vars)
 # - Correctness: 1.0 if correct, 0 otherwise
 # - Length: 1.0 if correct AND within threshold, 0 otherwise (conditioned mode)
-export MATH_CORRECT_REWARD=1.0
-export MATH_LENGTH_REWARD=1.0
-export MATH_LENGTH_THRESHOLD=2000
-export MATH_LENGTH_MODE=conditioned
+export DEEPSCALE_CORRECT_REWARD=1.0
+export DEEPSCALE_LENGTH_REWARD=1.0
+export DEEPSCALE_LENGTH_THRESHOLD=2000
+export DEEPSCALE_LENGTH_MODE=conditioned
 
 # Ray configuration
 export RAY_USAGE_STATS_ENABLED=0
