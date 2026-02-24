@@ -193,22 +193,22 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                                                                         eos_mask=response_mask,
                                                                         index=index)
 
-        # Apply static weights if provided: gdpo_weights=[correctness_weight, format_weight, length_weight]
+        # Apply static weights: gdpo_weights=[correctness, format, length]
         w_correctness = gdpo_weights[0] if gdpo_weights is not None else 1.0
-        w_format = gdpo_weights[1] if gdpo_weights is not None and len(gdpo_weights) > 1 else 1.0
-        w_length = gdpo_weights[2] if gdpo_weights is not None and len(gdpo_weights) > 2 else 1.0
+        w_format = gdpo_weights[1] if gdpo_weights is not None else 1.0
+        w_length = gdpo_weights[2] if gdpo_weights is not None else 1.0
 
         new_advantage = w_correctness * correctness_normalized_score
 
-        ## handle format (only if enabled, i.e. has non-zero values)
-        if token_level_scores_format.abs().sum() > 0:
+        ## handle format (skip if weight=0 or scores all zero)
+        if w_format != 0 and token_level_scores_format.abs().sum() > 0:
             format_normalized_score, _ = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_scores_format,
                                                                             eos_mask=response_mask,
                                                                             index=index)
             new_advantage = new_advantage + w_format * format_normalized_score
 
-        ## handle length reward (only if enabled, i.e. has non-zero values)
-        if token_level_scores_length is not None and token_level_scores_length.abs().sum() > 0:
+        ## handle length reward (skip if weight=0 or scores all zero)
+        if w_length != 0 and token_level_scores_length is not None and token_level_scores_length.abs().sum() > 0:
             length_normalized_score, _ = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_scores_length,
                                                                             eos_mask=response_mask,
                                                                             index=index)
@@ -398,6 +398,198 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         dgdo_state['metrics'] = dgdo_metrics
 
         # Weighted combination
+        new_advantage = sum(w * adv for w, adv in zip(current_weights.tolist(), reward_advantages))
+        advantages = masked_whiten(new_advantage, response_mask) * response_mask
+
+        data.batch['advantages'] = advantages
+        data.batch['returns'] = advantages
+
+    elif adv_estimator == 'dgdo2':
+        # DGDO2: Potential-Weighted Dynamic Gradient-Decoupled Optimization
+        # D_k = CV_k * (1 - (mu_k - R_min) / (R_max - R_min))^alpha
+        # Uses linear normalization instead of softmax
+
+        if dgdo_state is None:
+            raise ValueError("dgdo_state must be provided for DGDO2 advantage estimator")
+
+        # Get reward tensors (raw, before normalization)
+        token_level_scores_correctness = data.batch['token_level_scores_correctness']
+        token_level_scores_format = data.batch['token_level_scores_format']
+        token_level_scores_length = data.batch.get('token_level_scores_length', None)
+
+        # Shared variables
+        index = data.non_tensor_batch['uid']
+        responses = data.batch['responses']
+        response_length = responses.size(-1)
+        attention_mask = data.batch['attention_mask']
+        response_mask = attention_mask[:, -response_length:]
+        device = response_mask.device
+
+        # Phase 1: Compute GRPO-normalized advantages for each component
+        correctness_adv, _ = core_algos.compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_scores_correctness,
+            eos_mask=response_mask,
+            index=index)
+
+        reward_advantages = [correctness_adv]
+        raw_token_scores = [token_level_scores_correctness]
+        reward_names = ['correctness']
+
+        if token_level_scores_format.abs().sum() > 0:
+            format_adv, _ = core_algos.compute_grpo_outcome_advantage(
+                token_level_rewards=token_level_scores_format,
+                eos_mask=response_mask,
+                index=index)
+            reward_advantages.append(format_adv)
+            raw_token_scores.append(token_level_scores_format)
+            reward_names.append('format')
+
+        if token_level_scores_length is not None and token_level_scores_length.abs().sum() > 0:
+            length_adv, _ = core_algos.compute_grpo_outcome_advantage(
+                token_level_rewards=token_level_scores_length,
+                eos_mask=response_mask,
+                index=index)
+            reward_advantages.append(length_adv)
+            raw_token_scores.append(token_level_scores_length)
+            reward_names.append('length')
+
+        num_rewards = len(reward_advantages)
+
+        # Increment step counter
+        dgdo_state['step_count'] = dgdo_state.get('step_count', 0) + 1
+        current_step = dgdo_state['step_count']
+
+        dgdo2_metrics = {}
+        dgdo2_metrics['dgdo2/step'] = float(current_step)
+
+        # Extract hyperparameters
+        dgdo2_alpha = dgdo_state.get('alpha', 1.0)
+        dgdo2_beta = dgdo_state.get('beta', 0.9)
+        dgdo2_epsilon = dgdo_state.get('epsilon', 1e-6)
+        reward_bounds = dgdo_state.get('reward_bounds', {})
+
+        # WARMUP: Return uniform weights during warmup period
+        dgdo2_warmup_steps = dgdo_state.get('warmup_steps', 0)
+        if dgdo2_warmup_steps > 0 and current_step <= dgdo2_warmup_steps:
+            uniform_weights = torch.ones(num_rewards, device=device) / num_rewards
+            dgdo2_metrics['dgdo2/in_warmup'] = 1.0
+            dgdo2_metrics['dgdo2/warmup_progress'] = current_step / dgdo2_warmup_steps
+            for k in range(num_rewards):
+                dgdo2_metrics[f'dgdo2/reward_{reward_names[k]}/weight'] = uniform_weights[k].item()
+            entropy = -(uniform_weights * torch.log(uniform_weights + 1e-8)).sum()
+            dgdo2_metrics['dgdo2/weight_entropy'] = entropy.item()
+            dgdo_state['metrics'] = dgdo2_metrics
+
+            new_advantage = sum(w * adv for w, adv in zip(uniform_weights.tolist(), reward_advantages))
+            advantages = masked_whiten(new_advantage, response_mask) * response_mask
+            data.batch['advantages'] = advantages
+            data.batch['returns'] = advantages
+            return data
+
+        dgdo2_metrics['dgdo2/in_warmup'] = 0.0
+
+        # Phase 2: Compute potential-weighted instability on RAW rewards
+        D_values = torch.zeros(num_rewards, device=device)
+
+        for k in range(num_rewards):
+            # Extract RAW scalar rewards (sum over response dim; reward is at last token)
+            raw_scores = (raw_token_scores[k] * response_mask).sum(dim=-1)
+
+            # Group by prompt index — Law of Total Variance
+            unique_indices = list(set(index))
+            group_means = []
+            group_vars = []
+
+            for idx in unique_indices:
+                mask_indices = [i for i, x in enumerate(index) if x == idx]
+                if len(mask_indices) > 0:
+                    group_scores = raw_scores[mask_indices]
+                    group_means.append(group_scores.mean())
+                    if len(mask_indices) > 1:
+                        group_vars.append(group_scores.var(unbiased=False))
+                    else:
+                        group_vars.append(torch.tensor(0.0, device=device))
+
+            group_means = torch.stack(group_means)
+            group_vars = torch.stack(group_vars)
+
+            # Batch statistics via Law of Total Variance
+            mu_batch = group_means.mean()
+            mean_within_var = group_vars.mean()
+            between_group_var = group_means.var(unbiased=False)
+            sigma_batch = torch.sqrt(mean_within_var + between_group_var + 1e-8)
+
+            # Coefficient of Variation
+            cv_k = sigma_batch / (torch.abs(mu_batch) + dgdo2_epsilon)
+
+            # Potential term: (1 - (mu - R_min) / (R_max - R_min))^alpha
+            name = reward_names[k]
+            if name in reward_bounds:
+                r_min, r_max = reward_bounds[name]
+            else:
+                # Fallback: estimate bounds from data (conservative)
+                r_min = 0.0
+                r_max = 1.0
+            r_range = r_max - r_min
+            if r_range > 0:
+                normalized_mu = (mu_batch.item() - r_min) / r_range
+                normalized_mu = max(0.0, min(1.0, normalized_mu))  # clamp to [0, 1]
+                potential_k = (1.0 - normalized_mu) ** dgdo2_alpha
+            else:
+                potential_k = 1.0  # degenerate case: single-value reward
+
+            # Potential-weighted instability
+            D_values[k] = cv_k * potential_k
+
+            # Log metrics
+            dgdo2_metrics[f'dgdo2/reward_{name}/mu_batch'] = mu_batch.item()
+            dgdo2_metrics[f'dgdo2/reward_{name}/sigma_batch'] = sigma_batch.item()
+            dgdo2_metrics[f'dgdo2/reward_{name}/cv'] = cv_k.item()
+            dgdo2_metrics[f'dgdo2/reward_{name}/potential'] = potential_k
+            dgdo2_metrics[f'dgdo2/reward_{name}/D_k'] = D_values[k].item()
+
+        # Linear normalization (NOT softmax)
+        D_sum = D_values.sum() + dgdo2_epsilon
+        target_weights = D_values / D_sum
+
+        # Compute effective beta (with optional schedule)
+        dgdo2_beta_start = dgdo_state.get('beta_start', None)
+        dgdo2_beta_warmup_steps = dgdo_state.get('beta_warmup_steps', 0)
+        if dgdo2_beta_start is not None and dgdo2_beta_warmup_steps > 0:
+            steps_since_warmup = current_step - dgdo2_warmup_steps
+            progress = min(max(steps_since_warmup, 0) / dgdo2_beta_warmup_steps, 1.0)
+            effective_beta = dgdo2_beta_start + progress * (dgdo2_beta - dgdo2_beta_start)
+        else:
+            effective_beta = dgdo2_beta
+        dgdo2_metrics['dgdo2/effective_beta'] = effective_beta
+
+        # EMA smoothing
+        if dgdo_state.get('weights') is None or not dgdo_state.get('initialized', False):
+            uniform_weights = torch.ones(num_rewards, device=device) / num_rewards
+            dgdo_state['weights'] = (effective_beta * uniform_weights + (1 - effective_beta) * target_weights).detach().cpu()
+            dgdo_state['initialized'] = True
+        else:
+            prev_weights = dgdo_state['weights'].to(device)
+            dgdo_state['weights'] = (effective_beta * prev_weights + (1 - effective_beta) * target_weights).detach().cpu()
+
+        current_weights = dgdo_state['weights'].to(device)
+
+        # Apply minimum weight constraint AFTER EMA smoothing
+        dgdo2_min_weight = dgdo_state.get('min_weight', None)
+        if dgdo2_min_weight is not None and dgdo2_min_weight > 0:
+            current_weights = torch.clamp(current_weights, min=dgdo2_min_weight)
+            current_weights = current_weights / current_weights.sum()
+
+        # Log final weights
+        for k in range(num_rewards):
+            dgdo2_metrics[f'dgdo2/reward_{reward_names[k]}/weight'] = current_weights[k].item()
+
+        entropy = -(current_weights * torch.log(current_weights + 1e-8)).sum()
+        dgdo2_metrics['dgdo2/weight_entropy'] = entropy.item()
+
+        dgdo_state['metrics'] = dgdo2_metrics
+
+        # Phase 3: Weighted combination of GRPO-normalized advantages + BatchNorm
         new_advantage = sum(w * adv for w, adv in zip(current_weights.tolist(), reward_advantages))
         advantages = masked_whiten(new_advantage, response_mask) * response_mask
 
@@ -626,8 +818,26 @@ class RayPPOTrainer(object):
         else:
             self.kl_ctrl = core_algos.FixedKLController(kl_coef=0.)
 
-        # GDPO static weights
-        self.gdpo_weights = config.algorithm.get('gdpo_weights', None)
+        # GDPO static weights: always [correctness, format, length]
+        # Prefer environment variables over OmegaConf config (bypasses ListConfig issues)
+        _gdpo_w_c = os.environ.get('GDPO_W_CORRECTNESS', None)
+        _gdpo_w_f = os.environ.get('GDPO_W_FORMAT', None)
+        _gdpo_w_l = os.environ.get('GDPO_W_LENGTH', None)
+        if _gdpo_w_c is not None or _gdpo_w_f is not None or _gdpo_w_l is not None:
+            self.gdpo_weights = [
+                float(_gdpo_w_c or '1.0'),
+                float(_gdpo_w_f or '1.0'),
+                float(_gdpo_w_l or '1.0'),
+            ]
+        else:
+            self.gdpo_weights = config.algorithm.get('gdpo_weights', None)
+            if self.gdpo_weights is not None:
+                # Convert OmegaConf ListConfig to plain Python floats and pad to 3
+                self.gdpo_weights = [float(w) for w in self.gdpo_weights]
+                while len(self.gdpo_weights) < 3:
+                    self.gdpo_weights.append(1.0)
+        if self.gdpo_weights is not None:
+            print(f"GDPO static weights: correctness={self.gdpo_weights[0]}, format={self.gdpo_weights[1]}, length={self.gdpo_weights[2]}")
 
         # DGDO state initialization
         self.dgdo_weights = None
@@ -643,6 +853,27 @@ class RayPPOTrainer(object):
         self.dgdo_beta_start = config.algorithm.get('dgdo_beta_start', None)
         self.dgdo_beta_warmup_steps = config.algorithm.get('dgdo_beta_warmup_steps', 0)
         self._dgdo_step_count = 0
+
+        # DGDO2 state initialization (potential-weighted instability)
+        self.dgdo2_weights = None
+        self.dgdo2_initialized = False
+        self.dgdo2_alpha = config.algorithm.get('dgdo2_alpha', 1.0)
+        self.dgdo2_beta = config.algorithm.get('dgdo2_beta', 0.9)
+        self.dgdo2_epsilon = config.algorithm.get('dgdo2_epsilon', 1e-6)
+        self.dgdo2_min_weight = config.algorithm.get('dgdo2_min_weight', None)
+        self.dgdo2_warmup_steps = config.algorithm.get('dgdo2_warmup_steps', 0)
+        self.dgdo2_beta_start = config.algorithm.get('dgdo2_beta_start', None)
+        self.dgdo2_beta_warmup_steps = config.algorithm.get('dgdo2_beta_warmup_steps', 0)
+        self._dgdo2_step_count = 0
+        # Parse reward bounds from env vars: DGDO2_BOUNDS_CORRECTNESS="-3.0,3.0" etc.
+        self.dgdo2_reward_bounds = {}
+        for name in ['correctness', 'format', 'length']:
+            env_val = os.environ.get(f'DGDO2_BOUNDS_{name.upper()}', None)
+            if env_val:
+                parts = env_val.split(',')
+                self.dgdo2_reward_bounds[name] = (float(parts[0]), float(parts[1]))
+        if self.dgdo2_reward_bounds:
+            print(f"DGDO2 reward bounds: {self.dgdo2_reward_bounds}")
 
         self._create_dataloader()
 
@@ -852,6 +1083,8 @@ class RayPPOTrainer(object):
             self.use_critic = False
         elif self.config.algorithm.adv_estimator == 'dgdo':
             self.use_critic = False
+        elif self.config.algorithm.adv_estimator == 'dgdo2':
+            self.use_critic = False
         else:
             raise NotImplementedError
 
@@ -925,6 +1158,9 @@ class RayPPOTrainer(object):
             'dgdo_weights': self.dgdo_weights.cpu() if self.dgdo_weights is not None else None,
             'dgdo_initialized': self.dgdo_initialized,
             'dgdo_step_count': self._dgdo_step_count,
+            'dgdo2_weights': self.dgdo2_weights.cpu() if self.dgdo2_weights is not None and hasattr(self.dgdo2_weights, 'cpu') else self.dgdo2_weights,
+            'dgdo2_initialized': self.dgdo2_initialized,
+            'dgdo2_step_count': self._dgdo2_step_count,
         }
         state_path = os.path.join(self.config.trainer.default_local_dir, 'training_state',
                                   f'global_step_{self.global_steps}')
@@ -999,9 +1235,14 @@ class RayPPOTrainer(object):
                 self.dgdo_weights = training_state.get('dgdo_weights')
                 self.dgdo_initialized = training_state.get('dgdo_initialized', False)
                 self._dgdo_step_count = training_state.get('dgdo_step_count', 0)
+                self.dgdo2_weights = training_state.get('dgdo2_weights')
+                self.dgdo2_initialized = training_state.get('dgdo2_initialized', False)
+                self._dgdo2_step_count = training_state.get('dgdo2_step_count', 0)
                 pprint(f'Loaded training state from step {resume_step}: '
                        f'dgdo_initialized={self.dgdo_initialized}, '
-                       f'dgdo_step_count={self._dgdo_step_count}')
+                       f'dgdo_step_count={self._dgdo_step_count}, '
+                       f'dgdo2_initialized={self.dgdo2_initialized}, '
+                       f'dgdo2_step_count={self._dgdo2_step_count}')
             else:
                 pprint(f'Warning: No training state found at {state_path}')
 
@@ -1123,6 +1364,20 @@ class RayPPOTrainer(object):
                                 'beta_warmup_steps': self.dgdo_beta_warmup_steps,
                                 'step_count': self._dgdo_step_count,
                             }
+                        elif self.config.algorithm.adv_estimator == 'dgdo2':
+                            dgdo_state = {
+                                'weights': self.dgdo2_weights,
+                                'initialized': self.dgdo2_initialized,
+                                'alpha': self.dgdo2_alpha,
+                                'beta': self.dgdo2_beta,
+                                'epsilon': self.dgdo2_epsilon,
+                                'min_weight': self.dgdo2_min_weight,
+                                'warmup_steps': self.dgdo2_warmup_steps,
+                                'beta_start': self.dgdo2_beta_start,
+                                'beta_warmup_steps': self.dgdo2_beta_warmup_steps,
+                                'step_count': self._dgdo2_step_count,
+                                'reward_bounds': self.dgdo2_reward_bounds,
+                            }
 
                         batch = compute_advantage(batch,
                                                   adv_estimator=self.config.algorithm.adv_estimator,
@@ -1137,6 +1392,12 @@ class RayPPOTrainer(object):
                             self.dgdo_weights = dgdo_state.get('weights')
                             self.dgdo_initialized = dgdo_state.get('initialized', False)
                             self._dgdo_step_count = dgdo_state.get('step_count', self._dgdo_step_count)
+                            if 'metrics' in dgdo_state:
+                                metrics.update(dgdo_state['metrics'])
+                        elif self.config.algorithm.adv_estimator == 'dgdo2' and dgdo_state is not None:
+                            self.dgdo2_weights = dgdo_state.get('weights')
+                            self.dgdo2_initialized = dgdo_state.get('initialized', False)
+                            self._dgdo2_step_count = dgdo_state.get('step_count', self._dgdo2_step_count)
                             if 'metrics' in dgdo_state:
                                 metrics.update(dgdo_state['metrics'])
 

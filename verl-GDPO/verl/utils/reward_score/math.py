@@ -13,19 +13,58 @@
 # limitations under the License.
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 
+import os
 
-def compute_score(solution_str, ground_truth) -> float:
-    retval = 0.
+
+def compute_score(solution_str, ground_truth, step=0, response_length=None):
+    """
+    Compute score for MATH dataset.
+
+    Returns: (total_score, format_score, correctness_score, length_score)
+
+    Rewards:
+    - R_correct = MATH_CORRECT_REWARD if answer is correct, 0 otherwise
+    - R_length: controlled by MATH_LENGTH_MODE
+        - "classic": R_length = MATH_LENGTH_REWARD if length <= threshold, 0 otherwise
+        - "conditioned": R_length = MATH_LENGTH_REWARD if correct AND length <= threshold, 0 otherwise
+    """
+    correctness_reward = float(os.getenv("MATH_CORRECT_REWARD", 1.0))
+    length_reward = float(os.getenv("MATH_LENGTH_REWARD", 0.0))
+    length_threshold = int(os.getenv("MATH_LENGTH_THRESHOLD", 3000))
+    length_mode = os.getenv("MATH_LENGTH_MODE", "conditioned")
+
+    # Correctness
+    is_correct = False
     try:
         string_in_last_boxed = last_boxed_only_string(solution_str)
         if string_in_last_boxed is not None:
             answer = remove_boxed(string_in_last_boxed)
             if is_equiv(answer, ground_truth):
-                retval = 1.
+                is_correct = True
     except Exception as e:
         print(e)
 
-    return retval
+    correctness_score = correctness_reward if is_correct else 0.0
+
+    # Length reward (use actual response token count if available, else estimate)
+    if response_length is not None:
+        token_count = response_length
+    else:
+        token_count = len(solution_str) / 4
+    within_length = token_count <= length_threshold
+
+    if length_reward > 0:
+        if length_mode == "conditioned":
+            length_score = length_reward if (is_correct and within_length) else 0.0
+        else:
+            length_score = length_reward if within_length else 0.0
+    else:
+        length_score = 0.0
+
+    format_score = 0.0
+
+    total_score = correctness_score + length_score + format_score
+    return total_score, format_score, correctness_score, length_score
 
 
 # string normalization from https://github.com/EleutherAI/lm-evaluation-harness/blob/master/lm_eval/tasks/hendrycks_math.py

@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ToolRL DGDO Training Script - Qwen2.5-1.5B-Instruct
+# ToolRL DGDO2 Training Script - Qwen2.5-1.5B-Instruct
+# DGDO2: Potential-Weighted Dynamic Gradient-Decoupled Optimization
 
 source "$(dirname $0)/.env"
 
@@ -36,22 +37,25 @@ export SCHEDULELENGTH=0
 # Paths - can be overridden via environment variables
 export DATA_DIR="${DATA_DIR:-$(dirname $0)/data/rlla_4k}"
 export BASE_MODEL="${BASE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
-export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen2.5-1.5B-DGDO-tool}"
-export CKPT_DIR="${CKPT_DIR:-/data/sxw240003/GDPO/results/toolrl_dgdo_qwen2.5-1.5b}"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen2.5-1.5B-DGDO2-tool}"
+export CKPT_DIR="${CKPT_DIR:-/data/sxw240003/GDPO/results/toolrl_dgdo2_qwen2.5-1.5b}"
 
 export RAY_USAGE_STATS_ENABLED=0
 export RAY_DISABLE_DOCKER_CPU_WARNING=1
 
-# in the most recent exp, i see format score very low. can we make sure that if the mean is very low, the weight shouldbt be too low regardless of how small its std is?
+# DGDO2 reward bounds: min,max for each component
+# ToolRL defaults: correctness=[-3,3], format=[0,1], length=[0,1]
+export DGDO2_BOUNDS_CORRECTNESS="-3.0,3.0"
+export DGDO2_BOUNDS_FORMAT="0.0,1.0"
+export DGDO2_BOUNDS_LENGTH="0.0,1.0"
 
 python3 -u -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=dgdo \
-    algorithm.dgdo_beta=0.9 \
-    algorithm.dgdo_epsilon=1e-6 \
-    algorithm.dgdo_warmup_steps=10 \
-    algorithm.dgdo_beta_start=0.8 \
-    algorithm.dgdo_beta_warmup_steps=100 \
-    algorithm.dgdo_min_weight=0.25 \
+    algorithm.adv_estimator=dgdo2 \
+    algorithm.dgdo2_alpha=1.0 \
+    algorithm.dgdo2_beta=0.9 \
+    algorithm.dgdo2_epsilon=1e-6 \
+    algorithm.dgdo2_warmup_steps=0 \
+    algorithm.dgdo2_min_weight=0.15 \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \
     data.train_batch_size=512 \

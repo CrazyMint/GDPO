@@ -148,7 +148,7 @@ reward_model:
 algorithm:
   gamma: 1.0
   lam: 1.0
-  adv_estimator: gae  # Options: gae, grpo, gdpo, dgdo
+  adv_estimator: gae  # Options: gae, grpo, gdpo, dgdo, dgdo2
   kl_penalty: kl  # how to estimate kl divergence
   kl_ctrl:
     type: fixed
@@ -162,6 +162,16 @@ algorithm:
   dgdo_beta_start: 0.5  # Initial beta for warmup
   dgdo_beta_warmup_steps: 0  # Steps to warmup beta from start to target
   dgdo_min_weight: 0.0  # Minimum weight floor for samples
+  # DGDO2 hyperparameters (only used when adv_estimator=dgdo2)
+  # Potential-weighted instability: D_k = CV_k * (1 - (mu_k - R_min) / (R_max - R_min))^alpha
+  # Reward bounds set via env vars: DGDO2_BOUNDS_CORRECTNESS="-3.0,3.0" etc.
+  dgdo2_alpha: 1.0          # Potential decay exponent
+  dgdo2_beta: 0.9           # EMA momentum for weight smoothing
+  dgdo2_epsilon: 1e-6       # Stability constant
+  dgdo2_warmup_steps: 0     # Steps before applying DGDO2 weighting
+  dgdo2_beta_start: 0.5     # Initial beta for warmup schedule
+  dgdo2_beta_warmup_steps: 0
+  dgdo2_min_weight: 0.0     # Minimum weight floor
   # filter_groups config for DAPO support
   filter_groups:
     enable: false
