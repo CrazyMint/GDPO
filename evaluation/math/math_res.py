@@ -33,7 +33,7 @@ def main():
         return
 
     # 定义固定的列名
-    benchmarks = ["aime24", "amc23", "math_500", "minerva", "olympiadbench"]
+    benchmarks = ["aime24", "aime25", "amc23", "math_500", "minerva", "olympiadbench"]
     accuracy_cols = [f"{b}_accuracy" for b in benchmarks]
     length_cols = [f"{b}_avg_length" for b in benchmarks]
     exceed_cols = [f"{b}_exceed_rate" for b in benchmarks]
@@ -84,6 +84,7 @@ def main():
             # 映射逻辑
             mapping = {
                 "aime24_|0": ("aime24_accuracy", "avg@n:n=10"),
+                "aime25_|0": ("aime25_accuracy", "avg@n:n=10"),
                 "amc23|0": ("amc23_accuracy", "avg@n:n=10"),
                 "math_500_|0": ("math_500_accuracy", "avg@n:n=3"),
                 "minerva|0": ("minerva_accuracy", "avg@n:n=3"),

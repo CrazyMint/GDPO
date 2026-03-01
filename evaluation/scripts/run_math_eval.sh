@@ -1,6 +1,6 @@
 #!/bin/bash
-# ===== Math Benchmark Evaluation =====
-# Runs math benchmarks (AIME24, AMC23, MATH-500, Minerva, OlympiadBench)
+# ===== Math Benchmark Evaluation (Sober Reasoning settings) =====
+# Runs math benchmarks (AIME24, AIME25, AMC23, MATH-500, Minerva, OlympiadBench)
 # using lighteval with vLLM backend.
 #
 # Usage: bash scripts/run_math_eval.sh <MODEL_PATH> [OUTPUT_DIR]
@@ -12,9 +12,9 @@
 # ========== Configuration ==========
 EVAL_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONDA_ENV="${CONDA_ENV:-sober}"
-TASKS="${TASKS:-aime24_,amc23,math_500_,minerva,olympiadbench}"
-TEMPERATURE="${TEMPERATURE:-0.6}"
-TOP_P="${TOP_P:-0.95}"
+TASKS="${TASKS:-aime24_,aime25_,amc23,math_500_,minerva,olympiadbench}"
+TEMPERATURE="${TEMPERATURE:-0.8}"
+TOP_P="${TOP_P:-0.9}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-32768}"
 MAX_MODEL_LENGTH="${MAX_MODEL_LENGTH:-32768}"
 # ====================================

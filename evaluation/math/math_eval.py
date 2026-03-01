@@ -24,7 +24,7 @@ MAIN_PY_PATH = os.path.join(_THIS_DIR, "math_main.py")
 DEFAULT_RESULT_DIR = os.path.join(EVAL_ROOT, "eval_results", "math")
 
 # Available math tasks
-MATH_TASKS = ["aime24_", "amc23", "math_500_", "minerva", "olympiadbench"]
+MATH_TASKS = ["aime24_", "aime25_", "amc23", "math_500_", "minerva", "olympiadbench"]
 
 
 def _resolve_path(path: str) -> str:
@@ -54,8 +54,8 @@ class MathEvalConfig:
     model_path: str             # HuggingFace ID or local path
     tasks: List[str]            # Math tasks to run
     output_dir: str             # Output directory for results
-    temperature: float = 0.6    # Sampling temperature
-    top_p: float = 0.95         # Top-p sampling
+    temperature: float = 0.8    # Sampling temperature (Sober Reasoning default)
+    top_p: float = 0.9          # Top-p sampling (Sober Reasoning default)
     max_new_tokens: int = 32768 # Max new tokens
     max_model_length: int = 32768  # Max model length
 
@@ -64,8 +64,8 @@ def run_math_eval(
     model_path: str,
     tasks: Optional[List[str]] = None,
     output_dir: Optional[str] = None,
-    temperature: float = 0.6,
-    top_p: float = 0.95,
+    temperature: float = 0.8,
+    top_p: float = 0.9,
     max_new_tokens: int = 32768,
     max_model_length: int = 32768,
     conda_env: str = MATH_CONDA_ENV,
@@ -232,7 +232,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tasks",
         type=str,
-        default="aime24_,amc23,math_500_,minerva,olympiadbench",
+        default="aime24_,aime25_,amc23,math_500_,minerva,olympiadbench",
         help="Comma-separated list of math tasks (default: all tasks)"
     )
     parser.add_argument(
@@ -246,14 +246,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.6,
-        help="Sampling temperature (default: 0.6)"
+        default=0.8,
+        help="Sampling temperature (default: 0.8, Sober Reasoning)"
     )
     parser.add_argument(
         "--top_p",
         type=float,
-        default=0.95,
-        help="Top-p sampling parameter (default: 0.95)"
+        default=0.9,
+        help="Top-p sampling parameter (default: 0.9, Sober Reasoning)"
     )
     parser.add_argument(
         "--max_new_tokens",
