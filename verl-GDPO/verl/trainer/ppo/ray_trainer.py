@@ -382,9 +382,17 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         current_weights = dgdo_state['weights'].to(device)
 
         # Apply minimum weight constraint AFTER EMA smoothing
+        # Hard floor: reduce only above-minimum weights to cover the deficit
         if dgdo_min_weight is not None and dgdo_min_weight > 0:
-            current_weights = torch.clamp(current_weights, min=dgdo_min_weight)
-            current_weights = current_weights / current_weights.sum()
+            below_mask = current_weights < dgdo_min_weight
+            if below_mask.any():
+                deficit = (dgdo_min_weight - current_weights[below_mask]).sum()
+                current_weights[below_mask] = dgdo_min_weight
+                above_mask = ~below_mask
+                if above_mask.any():
+                    above_sum = current_weights[above_mask].sum()
+                    current_weights[above_mask] = current_weights[above_mask] * (above_sum - deficit) / above_sum
+                current_weights = current_weights / current_weights.sum()  # ensure exact sum=1
 
         # Log final weights
         for k in range(num_rewards):
@@ -575,10 +583,18 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         current_weights = dgdo_state['weights'].to(device)
 
         # Apply minimum weight constraint AFTER EMA smoothing
+        # Hard floor: reduce only above-minimum weights to cover the deficit
         dgdo2_min_weight = dgdo_state.get('min_weight', None)
         if dgdo2_min_weight is not None and dgdo2_min_weight > 0:
-            current_weights = torch.clamp(current_weights, min=dgdo2_min_weight)
-            current_weights = current_weights / current_weights.sum()
+            below_mask = current_weights < dgdo2_min_weight
+            if below_mask.any():
+                deficit = (dgdo2_min_weight - current_weights[below_mask]).sum()
+                current_weights[below_mask] = dgdo2_min_weight
+                above_mask = ~below_mask
+                if above_mask.any():
+                    above_sum = current_weights[above_mask].sum()
+                    current_weights[above_mask] = current_weights[above_mask] * (above_sum - deficit) / above_sum
+                current_weights = current_weights / current_weights.sum()  # ensure exact sum=1
 
         # Log final weights
         for k in range(num_rewards):
