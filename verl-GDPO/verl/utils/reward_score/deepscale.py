@@ -106,14 +106,17 @@ def compute_score(
 
     Rewards:
     - R_correct = 1 if answer is correct, 0 otherwise
-    - R_length: two modes controlled by DEEPSCALE_LENGTH_MODE
+    - R_length: controlled by DEEPSCALE_LENGTH_MODE
         - "classic": R_length = 1 if length <= threshold, 0 otherwise
         - "conditioned": R_length = 1 if correct AND length <= threshold, 0 otherwise
+        - "soft": linear decay from 1→0 between threshold and max_length
+        - "conditioned_soft": soft decay, but 0 if answer is incorrect
     - R_format = 1 if \\boxed{} present, 0 otherwise (controlled by DEEPSCALE_USE_FORMAT)
     """
     correctness_reward = float(os.getenv("DEEPSCALE_CORRECT_REWARD", 1.0))
     length_reward = float(os.getenv("DEEPSCALE_LENGTH_REWARD", 1.0))
     length_threshold = int(os.getenv("DEEPSCALE_LENGTH_THRESHOLD", 4000))
+    length_max = int(os.getenv("DEEPSCALE_LENGTH_MAX", 4000))
     length_mode = os.getenv("DEEPSCALE_LENGTH_MODE", "classic")
     format_reward = float(os.getenv("DEEPSCALE_FORMAT_REWARD", 1.0))
     use_format = os.getenv("DEEPSCALE_USE_FORMAT", "0") == "1"
@@ -159,6 +162,22 @@ def compute_score(
 
     if length_mode == "conditioned":
         length_score = length_reward if (is_correct and within_length) else 0.0
+    elif length_mode == "soft":
+        if estimated_tokens <= length_threshold:
+            length_score = length_reward
+        elif estimated_tokens >= length_max:
+            length_score = 0.0
+        else:
+            length_score = length_reward * (1.0 - (estimated_tokens - length_threshold) / (length_max - length_threshold))
+    elif length_mode == "conditioned_soft":
+        if not is_correct:
+            length_score = 0.0
+        elif estimated_tokens <= length_threshold:
+            length_score = length_reward
+        elif estimated_tokens >= length_max:
+            length_score = 0.0
+        else:
+            length_score = length_reward * (1.0 - (estimated_tokens - length_threshold) / (length_max - length_threshold))
     else:
         length_score = length_reward if within_length else 0.0
 
