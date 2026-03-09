@@ -1,8 +1,8 @@
 #!/bin/bash
-# ===== Math Benchmark Evaluation (n=16 samples, temp=0.6, top_p=0.95) =====
-# Matches the eval protocol from Sober Reasoning:
+# ===== Math Benchmark Evaluation (temp=0.6, top_p=0.95) =====
+# Uses updated sampling settings while keeping original sample counts:
 #   - temperature=0.6, top_p=0.95
-#   - 16 samples per question (all tasks)
+#   - AIME/AMC: 10 samples, MATH-500/Minerva/OlympiadBench: 3 samples
 #   - max response length 32k
 #
 # Usage: bash scripts/run_math_eval_n16.sh <MODEL_PATH> [OUTPUT_DIR]
@@ -17,8 +17,8 @@ MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-32768}"
 MAX_MODEL_LENGTH="${MAX_MODEL_LENGTH:-32768}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 DATA_PARALLEL_SIZE="${DATA_PARALLEL_SIZE:-1}"
-# Use n=16 tasks definition
-CUSTOM_TASKS="${EVAL_ROOT}/math_eval_module/lighteval_tasks_n16.py"
+# Use original tasks definition (n=10 for AIME/AMC, n=3 for others)
+CUSTOM_TASKS="${EVAL_ROOT}/math_eval_module/lighteval_tasks.py"
 # Use vLLM v0 engine to avoid flashinfer JIT compilation issues
 export VLLM_USE_V1="${VLLM_USE_V1:-0}"
 # ====================================
@@ -39,7 +39,7 @@ if [ -z "$OUTPUT_DIR" ]; then
 fi
 
 echo "=========================================================="
-echo "Math Evaluation (n=16, temp=0.6, top_p=0.95)"
+echo "Math Evaluation (temp=0.6, top_p=0.95)"
 echo "=========================================================="
 echo "  Model: $MODEL_PATH"
 echo "  Tasks: $TASKS"

@@ -1,6 +1,6 @@
 #!/bin/bash
-# ===== Batch Math Evaluation (n=16 samples, temp=0.6, top_p=0.95) =====
-# Re-evaluates trained models using the Sober Reasoning eval protocol.
+# ===== Batch Math Evaluation (temp=0.6, top_p=0.95) =====
+# Re-evaluates trained models with updated sampling settings.
 # Results are saved to eval_results/math_n16/ (separate from original results).
 #
 # Runs up to N_GPUS models in parallel (one model per GPU).
@@ -42,8 +42,8 @@ MODELS=(
 )
 
 echo "=========================================================="
-echo "Batch Math Evaluation n=16 (${#MODELS[@]} models, ${N_GPUS} GPUs)"
-echo "temp=0.6, top_p=0.95, 16 samples per question"
+echo "Batch Math Evaluation (${#MODELS[@]} models, ${N_GPUS} GPUs)"
+echo "temp=0.6, top_p=0.95"
 echo "=========================================================="
 
 PIDS=()
