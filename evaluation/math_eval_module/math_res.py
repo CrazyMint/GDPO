@@ -1,10 +1,46 @@
 import argparse
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from transformers import AutoTokenizer
+
+
+def check_format(response: str) -> dict:
+    """Check format compliance of a model response.
+
+    Returns dict with:
+      - has_boxed: bool — response contains \\boxed{}
+      - has_think: bool — response contains <think>...</think>
+      - think_before_answer: bool — </think> appears before \\boxed{}
+      - format_score: float — strict format score (0.0 to 1.0)
+    """
+    if response is None or (isinstance(response, float) and np.isnan(response)):
+        return {"has_boxed": False, "has_think": False, "think_before_answer": False, "format_score": 0.0}
+
+    response = str(response)
+    has_boxed = "\\boxed" in response
+    has_think = "<think>" in response and "</think>" in response
+
+    think_before_answer = False
+    if has_think:
+        think_end = response.rfind("</think>")
+        boxed_pos = response.rfind("\\boxed")
+        if think_end >= 0 and (boxed_pos < 0 or think_end < boxed_pos):
+            think_before_answer = True
+
+    # Strict format score (matches training reward)
+    fmt = 0.0
+    if has_boxed:
+        fmt += 0.5
+    if has_think:
+        if think_before_answer:
+            fmt += 0.5
+        else:
+            fmt += 0.25
+    return {"has_boxed": has_boxed, "has_think": has_think, "think_before_answer": think_before_answer, "format_score": fmt}
 
 
 def main():
@@ -37,6 +73,7 @@ def main():
     accuracy_cols = [f"{b}_accuracy" for b in benchmarks]
     length_cols = [f"{b}_avg_length" for b in benchmarks]
     exceed_cols = [f"{b}_exceed_rate" for b in benchmarks]
+    format_cols = [f"{b}_format_score" for b in benchmarks]
 
     # Number of problems per benchmark (for sample-weighted averages)
     n_problems = {
@@ -51,8 +88,9 @@ def main():
         + accuracy_cols
         + length_cols
         + exceed_cols
-        + ["avg_accuracy", "avg_length", "avg_exceed_rate"]
-        + ["wavg_accuracy", "wavg_length", "wavg_exceed_rate"]
+        + format_cols
+        + ["avg_accuracy", "avg_length", "avg_exceed_rate", "avg_format_score"]
+        + ["wavg_accuracy", "wavg_length", "wavg_exceed_rate", "wavg_format_score"]
     )
 
     # --- 核心改进：加载现有进度 ---
@@ -147,16 +185,18 @@ def main():
         model_idx = df[df["model"] == model_name].index[0]
         col_length = f"{benchmark}_avg_length"
         col_exceed = f"{benchmark}_exceed_rate"
+        col_format = f"{benchmark}_format_score"
 
         # --- 核心改进：跳过已存在的数据 ---
         if pd.notnull(df.loc[model_idx, col_length]) and pd.notnull(
             df.loc[model_idx, col_exceed]
-        ):
+        ) and pd.notnull(df.loc[model_idx, col_format]):
             continue
 
         print(f"Calculating tokens for {model_name} - {benchmark}...")
         detail_df = pd.read_parquet(parquet_path)
         all_lengths = []
+        all_format_scores = []
         exceed_count = 0
         total_count = 0
 
@@ -173,20 +213,25 @@ def main():
                 total_count += 1
                 if length > MAX_LENGTH:
                     exceed_count += 1
+                # Format check
+                fmt = check_format(response)
+                all_format_scores.append(fmt["format_score"])
 
         if total_count > 0:
             df.loc[model_idx, col_length] = np.mean(all_lengths)
             df.loc[model_idx, col_exceed] = round(exceed_count / total_count * 100, 2)
+            df.loc[model_idx, col_format] = round(np.mean(all_format_scores) * 100, 2)
 
     # --- 计算统计数据 ---
     # 确保数值类型，以便计算均值
-    for col in accuracy_cols + length_cols + exceed_cols:
+    for col in accuracy_cols + length_cols + exceed_cols + format_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # Simple mean of 6 tasks
     df["avg_accuracy"] = df[accuracy_cols].mean(axis=1, skipna=True).round(2)
     df["avg_length"] = df[length_cols].mean(axis=1, skipna=True).round(2)
     df["avg_exceed_rate"] = df[exceed_cols].mean(axis=1, skipna=True).round(2)
+    df["avg_format_score"] = df[format_cols].mean(axis=1, skipna=True).round(2)
 
     # Sample-weighted mean (weighted by number of problems per benchmark)
     df["wavg_accuracy"] = df[accuracy_cols].apply(
@@ -196,6 +241,9 @@ def main():
         lambda row: np.average(row.dropna(), weights=weights_norm[:len(row.dropna())]) if row.notna().any() else np.nan, axis=1
     ).round(2)
     df["wavg_exceed_rate"] = df[exceed_cols].apply(
+        lambda row: np.average(row.dropna(), weights=weights_norm[:len(row.dropna())]) if row.notna().any() else np.nan, axis=1
+    ).round(2)
+    df["wavg_format_score"] = df[format_cols].apply(
         lambda row: np.average(row.dropna(), weights=weights_norm[:len(row.dropna())]) if row.notna().any() else np.nan, axis=1
     ).round(2)
 

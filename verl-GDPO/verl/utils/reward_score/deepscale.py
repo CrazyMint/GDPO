@@ -111,7 +111,9 @@ def compute_score(
         - "conditioned": R_length = 1 if correct AND length <= threshold, 0 otherwise
         - "soft": linear decay from 1→0 between threshold and max_length
         - "conditioned_soft": soft decay, but 0 if answer is incorrect
-    - R_format = 1 if \\boxed{} present, 0 otherwise (controlled by DEEPSCALE_USE_FORMAT)
+    - R_format: controlled by DEEPSCALE_FORMAT_MODE (requires DEEPSCALE_USE_FORMAT=1)
+        - "boxed": 1 if \\boxed{} present, 0 otherwise
+        - "strict": partial credit — 0.5 for \\boxed{} + 0.5 for proper <think>...</think> structure
     """
     correctness_reward = float(os.getenv("DEEPSCALE_CORRECT_REWARD", 1.0))
     length_reward = float(os.getenv("DEEPSCALE_LENGTH_REWARD", 1.0))
@@ -119,6 +121,7 @@ def compute_score(
     length_max = int(os.getenv("DEEPSCALE_LENGTH_MAX", 4000))
     length_mode = os.getenv("DEEPSCALE_LENGTH_MODE", "classic")
     format_reward = float(os.getenv("DEEPSCALE_FORMAT_REWARD", 1.0))
+    format_mode = os.getenv("DEEPSCALE_FORMAT_MODE", "boxed")
     use_format = os.getenv("DEEPSCALE_USE_FORMAT", "0") == "1"
 
     if HAS_DEEPSCALER:
@@ -182,7 +185,24 @@ def compute_score(
         length_score = length_reward if within_length else 0.0
 
     if use_format:
-        format_score = format_reward if model_answer is not None else 0.0
+        if format_mode == "strict":
+            # Partial credit: 0.5 for \boxed{} + 0.5 for proper <think> structure
+            fmt = 0.0
+            has_boxed = model_answer is not None
+            has_think = ("<think>" in solution_str and "</think>" in solution_str)
+            if has_boxed:
+                fmt += 0.5
+            if has_think:
+                think_end = solution_str.rfind("</think>")
+                boxed_pos = solution_str.rfind("\\boxed")
+                if think_end >= 0 and (boxed_pos < 0 or think_end < boxed_pos):
+                    fmt += 0.5  # proper order: reasoning before answer
+                else:
+                    fmt += 0.25  # has think tags but wrong order
+            format_score = fmt * format_reward
+        else:
+            # "boxed" mode: binary check for \boxed{}
+            format_score = format_reward if model_answer is not None else 0.0
     else:
         format_score = 0.0
 

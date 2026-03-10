@@ -571,13 +571,14 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             effective_beta = dgdo2_beta
         dgdo2_metrics['dgdo2/effective_beta'] = effective_beta
 
-        # EMA smoothing
-        if dgdo_state.get('weights') is None or not dgdo_state.get('initialized', False):
+        # EMA smoothing (reset if num_rewards changed, e.g. format component toggled)
+        prev_weights = dgdo_state.get('weights')
+        if prev_weights is None or not dgdo_state.get('initialized', False) or prev_weights.shape[0] != num_rewards:
             uniform_weights = torch.ones(num_rewards, device=device) / num_rewards
             dgdo_state['weights'] = (effective_beta * uniform_weights + (1 - effective_beta) * target_weights).detach().cpu()
             dgdo_state['initialized'] = True
         else:
-            prev_weights = dgdo_state['weights'].to(device)
+            prev_weights = prev_weights.to(device)
             dgdo_state['weights'] = (effective_beta * prev_weights + (1 - effective_beta) * target_weights).detach().cpu()
 
         current_weights = dgdo_state['weights'].to(device)
