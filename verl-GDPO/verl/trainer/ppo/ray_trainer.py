@@ -613,6 +613,235 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch['advantages'] = advantages
         data.batch['returns'] = advantages
 
+    elif adv_estimator == 'dgdo_eff':
+        # DGDO-Eff: Efficient Reasoning via Dynamic Budget Calibration
+        # Computes per-problem optimal length L* from correct rollouts online,
+        # then uses asymmetric D_k (Verbosity Potential for efficiency) with DGDO weighting.
+
+        if dgdo_state is None:
+            raise ValueError("dgdo_state must be provided for DGDO-Eff advantage estimator")
+
+        # Get reward tensors
+        token_level_scores_correctness = data.batch['token_level_scores_correctness']
+
+        # Shared variables
+        index = data.non_tensor_batch['uid']
+        responses = data.batch['responses']
+        response_length = responses.size(-1)
+        attention_mask = data.batch['attention_mask']
+        response_mask = attention_mask[:, -response_length:]
+        device = response_mask.device
+
+        # Extract hyperparameters
+        eff_alpha = dgdo_state.get('alpha', 1.0)
+        eff_beta = dgdo_state.get('beta', 0.95)
+        eff_epsilon = dgdo_state.get('epsilon', 1e-8)
+        eff_bmax = dgdo_state.get('bmax', 8000)
+        eff_w_min = dgdo_state.get('w_min', 0.3)
+        eff_lstar_mode = dgdo_state.get('lstar_mode', 'max_asym')
+
+        # Increment step counter
+        dgdo_state['step_count'] = dgdo_state.get('step_count', 0) + 1
+        current_step = dgdo_state['step_count']
+
+        eff_metrics = {}
+        eff_metrics['dgdo_eff/step'] = float(current_step)
+        eff_metrics['dgdo_eff/lstar_mode'] = 0.0 if eff_lstar_mode == 'max_asym' else 1.0
+
+        # --- Phase 1: Compute per-problem optimal length L* and R_eff ---
+        # Extract scalar correctness scores per trajectory
+        raw_corr_scores = (token_level_scores_correctness * response_mask).sum(dim=-1)
+        is_correct = (raw_corr_scores > 0.5).float()
+
+        # Response token lengths per trajectory
+        resp_lengths = response_mask.sum(dim=-1).float()
+
+        # Group rollouts by prompt uid, compute L* per prompt
+        unique_uids = list(set(index))
+        uid_to_lstar = {}
+
+        for uid in unique_uids:
+            uid_indices = [i for i, x in enumerate(index) if x == uid]
+            correct_lengths = []
+            for idx in uid_indices:
+                if is_correct[idx] > 0.5:
+                    correct_lengths.append(resp_lengths[idx].item())
+            if len(correct_lengths) >= 1:
+                uid_to_lstar[uid] = max(min(sum(correct_lengths) / len(correct_lengths), 4000), 1000)  # L* = clamp(mean(correct), 1000, 4000)
+            else:
+                uid_to_lstar[uid] = eff_bmax  # no correct rollout: no efficiency pressure
+
+        # Compute R_eff per trajectory based on lstar_mode
+        r_eff = torch.zeros_like(raw_corr_scores)
+        for i in range(len(index)):
+            lstar = uid_to_lstar[index[i]]
+            l = resp_lengths[i].item()
+
+            if eff_lstar_mode == 'max_sym':
+                # Symmetric: penalize deviation from L* in both directions
+                # R_eff = 1 - |l - L*| / L*, clamped to [-1, 1]
+                r_eff[i] = max(-1.0, 1.0 - abs(l - lstar) / lstar)
+            else:
+                # 'max_asym' (default): asymmetric
+                # Correct: max(0, 1 - l/L*) — never negative, shorter = higher reward
+                # Incorrect: clamp(1 - l/L*, -1, 0) — non-positive, longer = more penalty
+                raw_eff = 1.0 - l / lstar
+                if is_correct[i] > 0.5:
+                    if l < 500:
+                        r_eff[i] = 0.0  # suspiciously short: no efficiency reward
+                    else:
+                        r_eff[i] = max(0.0, raw_eff)  # correct: never penalized
+                else:
+                    r_eff[i] = max(-1.0, min(0.0, raw_eff))  # incorrect: non-positive
+
+        # Create token-level efficiency reward tensor (scalar at last valid token)
+        token_level_scores_efficiency = torch.zeros_like(token_level_scores_correctness)
+        for i in range(len(r_eff)):
+            valid_len = int(response_mask[i].sum().item())
+            if valid_len > 0:
+                token_level_scores_efficiency[i, valid_len - 1] = r_eff[i]
+
+        # Log L* statistics
+        lstar_values = list(uid_to_lstar.values())
+        lstar_non_bmax = [v for v in lstar_values if v < eff_bmax]
+        eff_metrics['dgdo_eff/lstar_mean'] = float(np.mean(lstar_values)) if lstar_values else 0.0
+        eff_metrics['dgdo_eff/lstar_mean_solvable'] = float(np.mean(lstar_non_bmax)) if lstar_non_bmax else 0.0
+        eff_metrics['dgdo_eff/lstar_median_solvable'] = float(np.median(lstar_non_bmax)) if lstar_non_bmax else 0.0
+        eff_metrics['dgdo_eff/lstar_min_solvable'] = float(np.min(lstar_non_bmax)) if lstar_non_bmax else 0.0
+        eff_metrics['dgdo_eff/lstar_max_solvable'] = float(np.max(lstar_non_bmax)) if lstar_non_bmax else 0.0
+        eff_metrics['dgdo_eff/num_solvable_prompts'] = float(len(lstar_non_bmax))
+        eff_metrics['dgdo_eff/num_unsolved_prompts'] = float(len(lstar_values) - len(lstar_non_bmax))
+        eff_metrics['dgdo_eff/accuracy_batch'] = float(is_correct.mean().item())
+        # R_eff statistics (this is the internal efficiency reward, NOT the external length_score)
+        eff_metrics['dgdo_eff/r_eff_mean'] = float(r_eff.mean().item())
+        eff_metrics['dgdo_eff/r_eff_mean_correct'] = float(r_eff[is_correct > 0.5].mean().item()) if (is_correct > 0.5).any() else 0.0
+        eff_metrics['dgdo_eff/r_eff_min_correct'] = float(r_eff[is_correct > 0.5].min().item()) if (is_correct > 0.5).any() else 0.0
+        eff_metrics['dgdo_eff/r_eff_max_correct'] = float(r_eff[is_correct > 0.5].max().item()) if (is_correct > 0.5).any() else 0.0
+        eff_metrics['dgdo_eff/resp_len_mean'] = float(resp_lengths.mean().item())
+        eff_metrics['dgdo_eff/resp_len_mean_correct'] = float(resp_lengths[is_correct > 0.5].mean().item()) if (is_correct > 0.5).any() else 0.0
+
+        # --- Phase 2: GRPO-normalize each reward independently ---
+        correctness_adv, _ = core_algos.compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_scores_correctness,
+            eos_mask=response_mask,
+            index=index)
+
+        efficiency_adv, _ = core_algos.compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_scores_efficiency,
+            eos_mask=response_mask,
+            index=index)
+
+        # --- Phase 3: D_k computation with normalized CV ---
+        # Compute batch statistics using Law of Total Variance on RAW scores
+        # R_corr: computed over ALL trajectories
+        # R_eff: computed over CORRECT trajectories only (incorrect carry no efficiency signal)
+
+        # --- R_corr stats (all trajectories) ---
+        corr_group_means = []
+        corr_group_vars = []
+        for uid in unique_uids:
+            uid_indices = [i for i, x in enumerate(index) if x == uid]
+            uid_scores = raw_corr_scores[uid_indices]
+            corr_group_means.append(uid_scores.mean())
+            if len(uid_indices) > 1:
+                corr_group_vars.append(uid_scores.var(unbiased=False))
+            else:
+                corr_group_vars.append(torch.tensor(0.0, device=device))
+        corr_group_means = torch.stack(corr_group_means)
+        corr_group_vars = torch.stack(corr_group_vars)
+        mu_corr = corr_group_means.mean()
+        sigma_corr = torch.sqrt(corr_group_vars.mean() + corr_group_means.var(unbiased=False) + 1e-8)
+
+        # --- R_eff stats (correct trajectories only) ---
+        eff_group_means = []
+        eff_group_vars = []
+        for uid in unique_uids:
+            uid_indices = [i for i, x in enumerate(index) if x == uid]
+            correct_indices = [i for i in uid_indices if is_correct[i] > 0.5]
+            if len(correct_indices) >= 1:
+                uid_scores = r_eff[correct_indices]
+                eff_group_means.append(uid_scores.mean())
+                if len(correct_indices) > 1:
+                    eff_group_vars.append(uid_scores.var(unbiased=False))
+                else:
+                    eff_group_vars.append(torch.tensor(0.0, device=device))
+            # Skip prompts with no correct trajectories — they have no efficiency signal
+        if len(eff_group_means) >= 1:
+            eff_group_means = torch.stack(eff_group_means)
+            eff_group_vars = torch.stack(eff_group_vars)
+            mu_eff = eff_group_means.mean()
+            sigma_eff = torch.sqrt(eff_group_vars.mean() + eff_group_means.var(unbiased=False) + 1e-8)
+        else:
+            # No correct trajectories at all — D_eff should be 0
+            mu_eff = torch.tensor(0.0, device=device)
+            sigma_eff = torch.tensor(0.0, device=device)
+
+        # Compute CV for each reward
+        cv_corr = sigma_corr / (torch.abs(mu_corr) + eff_epsilon)
+        cv_eff = sigma_eff / (torch.abs(mu_eff) + eff_epsilon)
+
+        # Normalize CVs to same scale before computing D_k
+        cv_sum = cv_corr + cv_eff + eff_epsilon
+        cv_corr_norm = cv_corr / cv_sum
+        cv_eff_norm = cv_eff / cv_sum
+
+        # Standard Potential for both rewards
+        potential_corr = (1.0 - mu_corr.clamp(0, 1)) ** eff_alpha
+        R_eff_min, R_eff_max = -1.0, 1.0
+        potential_eff = (1.0 - (mu_eff.clamp(R_eff_min, R_eff_max) - R_eff_min) / (R_eff_max - R_eff_min)) ** eff_alpha
+
+        D_corr = cv_corr_norm * potential_corr
+        D_eff = cv_eff_norm * potential_eff
+
+        eff_metrics['dgdo_eff/mu_corr'] = mu_corr.item()
+        eff_metrics['dgdo_eff/sigma_corr'] = sigma_corr.item()
+        eff_metrics['dgdo_eff/cv_corr'] = cv_corr.item()
+        eff_metrics['dgdo_eff/cv_eff'] = cv_eff.item()
+        eff_metrics['dgdo_eff/cv_corr_norm'] = cv_corr_norm.item()
+        eff_metrics['dgdo_eff/cv_eff_norm'] = cv_eff_norm.item()
+        eff_metrics['dgdo_eff/potential_corr'] = potential_corr.item()
+        eff_metrics['dgdo_eff/potential_eff'] = potential_eff.item()
+        eff_metrics['dgdo_eff/D_corr'] = D_corr.item()
+        eff_metrics['dgdo_eff/D_eff'] = D_eff.item()
+        eff_metrics['dgdo_eff/mu_eff'] = mu_eff.item()
+        eff_metrics['dgdo_eff/sigma_eff'] = sigma_eff.item()
+
+        # --- Phase 4: Dynamic weight update with EMA ---
+        D_sum = D_corr + D_eff + eff_epsilon
+        target_w_corr = D_corr / D_sum
+        target_w_eff = D_eff / D_sum
+        target_weights = torch.tensor([target_w_corr.item(), target_w_eff.item()], device=device)
+
+        # EMA smoothing
+        prev_weights = dgdo_state.get('weights')
+        if prev_weights is None or not dgdo_state.get('initialized', False):
+            uniform = torch.tensor([0.5, 0.5], device=device)
+            dgdo_state['weights'] = (eff_beta * uniform + (1 - eff_beta) * target_weights).detach().cpu()
+            dgdo_state['initialized'] = True
+        else:
+            prev_w = prev_weights.to(device)
+            dgdo_state['weights'] = (eff_beta * prev_w + (1 - eff_beta) * target_weights).detach().cpu()
+
+        current_weights = dgdo_state['weights'].to(device)
+
+        # Apply w_min floor: w_corr >= w_min, w_eff = 1 - w_corr
+        w_corr = max(current_weights[0].item(), eff_w_min)
+        w_eff = 1.0 - w_corr
+
+        eff_metrics['dgdo_eff/target_w_corr'] = target_w_corr.item()
+        eff_metrics['dgdo_eff/target_w_eff'] = target_w_eff.item()
+        eff_metrics['dgdo_eff/w_corr'] = w_corr
+        eff_metrics['dgdo_eff/w_eff'] = w_eff
+
+        dgdo_state['metrics'] = eff_metrics
+
+        # --- Phase 5: Weighted combination + BatchNorm ---
+        new_advantage = w_corr * correctness_adv + w_eff * efficiency_adv
+        advantages = masked_whiten(new_advantage, response_mask) * response_mask
+
+        data.batch['advantages'] = advantages
+        data.batch['returns'] = advantages
+
     else:
         raise NotImplementedError
     return data
@@ -882,6 +1111,18 @@ class RayPPOTrainer(object):
         self.dgdo2_beta_start = config.algorithm.get('dgdo2_beta_start', None)
         self.dgdo2_beta_warmup_steps = config.algorithm.get('dgdo2_beta_warmup_steps', 0)
         self._dgdo2_step_count = 0
+
+        # DGDO-Eff state initialization
+        self.dgdo_eff_weights = None
+        self.dgdo_eff_initialized = False
+        self.dgdo_eff_alpha = config.algorithm.get('dgdo_eff_alpha', 1.0)
+        self.dgdo_eff_beta = config.algorithm.get('dgdo_eff_beta', 0.95)
+        self.dgdo_eff_epsilon = config.algorithm.get('dgdo_eff_epsilon', 1e-8)
+        self.dgdo_eff_bmax = config.algorithm.get('dgdo_eff_bmax', 8000)
+        self.dgdo_eff_w_min = config.algorithm.get('dgdo_eff_w_min', 0.3)
+        self.dgdo_eff_lstar_mode = config.algorithm.get('dgdo_eff_lstar_mode', 'max_asym')
+        self._dgdo_eff_step_count = 0
+
         # Parse reward bounds from env vars: DGDO2_BOUNDS_CORRECTNESS="-3.0,3.0" etc.
         self.dgdo2_reward_bounds = {}
         for name in ['correctness', 'format', 'length']:
@@ -906,11 +1147,15 @@ class RayPPOTrainer(object):
                                          filter_prompts=True,
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
                                          truncation='left')
+        # Use a Generator with fixed seed for reproducible batch ordering across resumes
+        train_generator = torch.Generator()
+        train_generator.manual_seed(42)
         self.train_dataloader = DataLoader(dataset=self.train_dataset,
                                            batch_size=self.config.data.train_batch_size,
                                            shuffle=True,
                                            drop_last=True,
-                                           collate_fn=collate_fn)
+                                           collate_fn=collate_fn,
+                                           generator=train_generator)
 
         self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
                                        tokenizer=self.tokenizer,
@@ -1102,6 +1347,8 @@ class RayPPOTrainer(object):
             self.use_critic = False
         elif self.config.algorithm.adv_estimator == 'dgdo2':
             self.use_critic = False
+        elif self.config.algorithm.adv_estimator == 'dgdo_eff':
+            self.use_critic = False
         else:
             raise NotImplementedError
 
@@ -1178,6 +1425,9 @@ class RayPPOTrainer(object):
             'dgdo2_weights': self.dgdo2_weights.cpu() if self.dgdo2_weights is not None and hasattr(self.dgdo2_weights, 'cpu') else self.dgdo2_weights,
             'dgdo2_initialized': self.dgdo2_initialized,
             'dgdo2_step_count': self._dgdo2_step_count,
+            'dgdo_eff_weights': self.dgdo_eff_weights.cpu() if self.dgdo_eff_weights is not None and hasattr(self.dgdo_eff_weights, 'cpu') else self.dgdo_eff_weights,
+            'dgdo_eff_initialized': self.dgdo_eff_initialized,
+            'dgdo_eff_step_count': self._dgdo_eff_step_count,
         }
         state_path = os.path.join(self.config.trainer.default_local_dir, 'training_state',
                                   f'global_step_{self.global_steps}')
@@ -1255,11 +1505,16 @@ class RayPPOTrainer(object):
                 self.dgdo2_weights = training_state.get('dgdo2_weights')
                 self.dgdo2_initialized = training_state.get('dgdo2_initialized', False)
                 self._dgdo2_step_count = training_state.get('dgdo2_step_count', 0)
+                self.dgdo_eff_weights = training_state.get('dgdo_eff_weights')
+                self.dgdo_eff_initialized = training_state.get('dgdo_eff_initialized', False)
+                self._dgdo_eff_step_count = training_state.get('dgdo_eff_step_count', 0)
                 pprint(f'Loaded training state from step {resume_step}: '
                        f'dgdo_initialized={self.dgdo_initialized}, '
                        f'dgdo_step_count={self._dgdo_step_count}, '
                        f'dgdo2_initialized={self.dgdo2_initialized}, '
-                       f'dgdo2_step_count={self._dgdo2_step_count}')
+                       f'dgdo2_step_count={self._dgdo2_step_count}, '
+                       f'dgdo_eff_initialized={self.dgdo_eff_initialized}, '
+                       f'dgdo_eff_step_count={self._dgdo_eff_step_count}')
             else:
                 pprint(f'Warning: No training state found at {state_path}')
 
@@ -1395,6 +1650,18 @@ class RayPPOTrainer(object):
                                 'step_count': self._dgdo2_step_count,
                                 'reward_bounds': self.dgdo2_reward_bounds,
                             }
+                        elif self.config.algorithm.adv_estimator == 'dgdo_eff':
+                            dgdo_state = {
+                                'weights': self.dgdo_eff_weights,
+                                'initialized': self.dgdo_eff_initialized,
+                                'alpha': self.dgdo_eff_alpha,
+                                'beta': self.dgdo_eff_beta,
+                                'epsilon': self.dgdo_eff_epsilon,
+                                'bmax': self.dgdo_eff_bmax,
+                                'w_min': self.dgdo_eff_w_min,
+                                'lstar_mode': self.dgdo_eff_lstar_mode,
+                                'step_count': self._dgdo_eff_step_count,
+                            }
 
                         batch = compute_advantage(batch,
                                                   adv_estimator=self.config.algorithm.adv_estimator,
@@ -1415,6 +1682,12 @@ class RayPPOTrainer(object):
                             self.dgdo2_weights = dgdo_state.get('weights')
                             self.dgdo2_initialized = dgdo_state.get('initialized', False)
                             self._dgdo2_step_count = dgdo_state.get('step_count', self._dgdo2_step_count)
+                            if 'metrics' in dgdo_state:
+                                metrics.update(dgdo_state['metrics'])
+                        elif self.config.algorithm.adv_estimator == 'dgdo_eff' and dgdo_state is not None:
+                            self.dgdo_eff_weights = dgdo_state.get('weights')
+                            self.dgdo_eff_initialized = dgdo_state.get('initialized', False)
+                            self._dgdo_eff_step_count = dgdo_state.get('step_count', self._dgdo_eff_step_count)
                             if 'metrics' in dgdo_state:
                                 metrics.update(dgdo_state['metrics'])
 

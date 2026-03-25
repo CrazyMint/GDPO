@@ -172,6 +172,14 @@ algorithm:
   dgdo2_beta_start: 0.5     # Initial beta for warmup schedule
   dgdo2_beta_warmup_steps: 0
   dgdo2_min_weight: 0.0     # Minimum weight floor
+  # DGDO-Eff hyperparameters (only used when adv_estimator=dgdo_eff)
+  # Online per-problem L* from correct rollouts; asymmetric D_k (Verbosity Potential for efficiency)
+  dgdo_eff_alpha: 1.0       # Potential decay exponent
+  dgdo_eff_beta: 0.95       # EMA momentum for weight smoothing
+  dgdo_eff_epsilon: 1e-8    # Stability constant
+  dgdo_eff_bmax: 8000       # Fallback L* when no correct rollouts exist (match max_response_length)
+  dgdo_eff_w_min: 0.3       # Minimum weight floor for correctness
+  dgdo_eff_lstar_mode: 'max_asym'  # 'max_asym': L*=max, correct>=0/incorrect<=0; 'max_sym': L*=max, symmetric |l-L*|/L*
   # filter_groups config for DAPO support
   filter_groups:
     enable: false
