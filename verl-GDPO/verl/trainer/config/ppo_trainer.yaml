@@ -179,7 +179,9 @@ algorithm:
   dgdo_eff_epsilon: 1e-8    # Stability constant
   dgdo_eff_bmax: 8000       # Fallback L* when no correct rollouts exist (match max_response_length)
   dgdo_eff_w_min: 0.3       # Minimum weight floor for correctness
-  dgdo_eff_lstar_mode: 'max_asym'  # 'max_asym': L*=max, correct>=0/incorrect<=0; 'max_sym': L*=max, symmetric |l-L*|/L*
+  dgdo_eff_lstar_mode: 'max_asym'  # 'max_asym' (default), 'max_sym' (symmetric |l-L*|/L*), 'upper_only' (penalize over-length only)
+  dgdo_eff_aggregator: 'mean_correct'  # how to aggregate L*_q over the group: 'mean_correct' (default), 'min_correct' (SOL), 'median_correct', 'mean_all'
+  dgdo_eff_static_w_corr: null         # if set (e.g. 0.5), bypass dynamic CV*Potential weighting and use fixed (w_corr, 1-w_corr); used by static-vs-dynamic ablation
   # filter_groups config for DAPO support
   filter_groups:
     enable: false
@@ -196,6 +198,9 @@ trainer:
   n_gpus_per_node: 8
   save_freq: -1
   test_freq: -1
+  # When false, skip saving optimizer/LR-scheduler checkpoints.
+  # Useful for sweeps where we train from scratch each run and never resume.
+  save_optimizer: true
   critic_warmup: 0
   default_hdfs_dir: null
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}

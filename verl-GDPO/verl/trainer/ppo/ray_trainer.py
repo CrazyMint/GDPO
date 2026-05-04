@@ -639,6 +639,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         eff_bmax = dgdo_state.get('bmax', 8000)
         eff_w_min = dgdo_state.get('w_min', 0.3)
         eff_lstar_mode = dgdo_state.get('lstar_mode', 'max_asym')
+        eff_aggregator = dgdo_state.get('aggregator', 'mean_correct')
 
         # Increment step counter
         dgdo_state['step_count'] = dgdo_state.get('step_count', 0) + 1
@@ -662,14 +663,35 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
 
         for uid in unique_uids:
             uid_indices = [i for i, x in enumerate(index) if x == uid]
+            all_lengths = [int(resp_lengths[idx].item()) for idx in uid_indices]
             correct_lengths = []
             for idx in uid_indices:
                 if is_correct[idx] > 0.5:
                     correct_lengths.append(resp_lengths[idx].item())
-            if len(correct_lengths) >= 1:
-                uid_to_lstar[uid] = max(min(sum(correct_lengths) / len(correct_lengths), 4000), 1000)  # L* = clamp(mean(correct), 1000, 4000)
+
+            if eff_aggregator == 'mean_all':
+                # Aggregate over ALL rollouts (correctness-blind). Ablation baseline.
+                if len(all_lengths) >= 1:
+                    raw = sum(all_lengths) / len(all_lengths)
+                    uid_to_lstar[uid] = max(min(raw, eff_bmax), 1000)
+                else:
+                    uid_to_lstar[uid] = eff_bmax
+            elif len(correct_lengths) >= 1:
+                if eff_aggregator == 'min_correct':
+                    raw = min(correct_lengths)             # SOL-style
+                elif eff_aggregator == 'median_correct':
+                    sl = sorted(correct_lengths)
+                    n = len(sl)
+                    raw = sl[n // 2] if n % 2 == 1 else 0.5 * (sl[n // 2 - 1] + sl[n // 2])
+                else:  # 'mean_correct' (default)
+                    raw = sum(correct_lengths) / len(correct_lengths)
+                # L* = clamp(raw, 1000, eff_bmax) — upper bound matches configured budget
+                uid_to_lstar[uid] = max(min(raw, eff_bmax), 1000)
             else:
                 uid_to_lstar[uid] = eff_bmax  # no correct rollout: no efficiency pressure
+
+            # SB-style per-problem rollout log
+            print(f"Lengths={all_lengths}, Correct={[int(l) for l in correct_lengths]}, L*={int(uid_to_lstar[uid])}", flush=True)
 
         # Compute R_eff per trajectory based on lstar_mode
         r_eff = torch.zeros_like(raw_corr_scores)
@@ -681,6 +703,11 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 # Symmetric: penalize deviation from L* in both directions
                 # R_eff = 1 - |l - L*| / L*, clamped to [-1, 1]
                 r_eff[i] = max(-1.0, 1.0 - abs(l - lstar) / lstar)
+            elif eff_lstar_mode == 'upper_only':
+                # Upper-only: penalize over-length only; no reward for being short.
+                #   R_eff = min(0, 1 - l/L*) -> 0 when l <= L*, negative when l > L*
+                # Ablation baseline that matches the standard global-budget formulation.
+                r_eff[i] = max(-1.0, min(0.0, 1.0 - l / lstar))
             else:
                 # 'max_asym' (default): asymmetric
                 # Correct: max(0, 1 - l/L*) — never negative, shorter = higher reward
@@ -806,30 +833,42 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         eff_metrics['dgdo_eff/mu_eff'] = mu_eff.item()
         eff_metrics['dgdo_eff/sigma_eff'] = sigma_eff.item()
 
-        # --- Phase 4: Dynamic weight update with EMA ---
+        # --- Phase 4: weight update ---
+        # If static_w_corr is provided (ablation), bypass the dynamic computation
+        # and use the fixed pair (w_corr, 1 - w_corr) at every step.
+        eff_static_w_corr = dgdo_state.get('static_w_corr', None)
         D_sum = D_corr + D_eff + eff_epsilon
-        target_w_corr = D_corr / D_sum
-        target_w_eff = D_eff / D_sum
-        target_weights = torch.tensor([target_w_corr.item(), target_w_eff.item()], device=device)
+        target_w_corr_dyn = D_corr / D_sum
+        target_w_eff_dyn = D_eff / D_sum
 
-        # EMA smoothing
-        prev_weights = dgdo_state.get('weights')
-        if prev_weights is None or not dgdo_state.get('initialized', False):
-            uniform = torch.tensor([0.5, 0.5], device=device)
-            dgdo_state['weights'] = (eff_beta * uniform + (1 - eff_beta) * target_weights).detach().cpu()
+        if eff_static_w_corr is not None:
+            w_corr = float(eff_static_w_corr)
+            w_eff = 1.0 - w_corr
+            # Persist the static pair so checkpoints reflect the actual weights used.
+            dgdo_state['weights'] = torch.tensor([w_corr, w_eff]).detach().cpu()
             dgdo_state['initialized'] = True
+            eff_metrics['dgdo_eff/static_w_corr'] = w_corr
         else:
-            prev_w = prev_weights.to(device)
-            dgdo_state['weights'] = (eff_beta * prev_w + (1 - eff_beta) * target_weights).detach().cpu()
+            target_weights = torch.tensor([target_w_corr_dyn.item(), target_w_eff_dyn.item()], device=device)
 
-        current_weights = dgdo_state['weights'].to(device)
+            # EMA smoothing
+            prev_weights = dgdo_state.get('weights')
+            if prev_weights is None or not dgdo_state.get('initialized', False):
+                uniform = torch.tensor([0.5, 0.5], device=device)
+                dgdo_state['weights'] = (eff_beta * uniform + (1 - eff_beta) * target_weights).detach().cpu()
+                dgdo_state['initialized'] = True
+            else:
+                prev_w = prev_weights.to(device)
+                dgdo_state['weights'] = (eff_beta * prev_w + (1 - eff_beta) * target_weights).detach().cpu()
 
-        # Apply w_min floor: w_corr >= w_min, w_eff = 1 - w_corr
-        w_corr = max(current_weights[0].item(), eff_w_min)
-        w_eff = 1.0 - w_corr
+            current_weights = dgdo_state['weights'].to(device)
 
-        eff_metrics['dgdo_eff/target_w_corr'] = target_w_corr.item()
-        eff_metrics['dgdo_eff/target_w_eff'] = target_w_eff.item()
+            # Apply w_min floor: w_corr >= w_min, w_eff = 1 - w_corr
+            w_corr = max(current_weights[0].item(), eff_w_min)
+            w_eff = 1.0 - w_corr
+
+        eff_metrics['dgdo_eff/target_w_corr'] = target_w_corr_dyn.item()
+        eff_metrics['dgdo_eff/target_w_eff'] = target_w_eff_dyn.item()
         eff_metrics['dgdo_eff/w_corr'] = w_corr
         eff_metrics['dgdo_eff/w_eff'] = w_eff
 
@@ -1121,6 +1160,16 @@ class RayPPOTrainer(object):
         self.dgdo_eff_bmax = config.algorithm.get('dgdo_eff_bmax', 8000)
         self.dgdo_eff_w_min = config.algorithm.get('dgdo_eff_w_min', 0.3)
         self.dgdo_eff_lstar_mode = config.algorithm.get('dgdo_eff_lstar_mode', 'max_asym')
+        # Aggregator for L*_q over the rollouts in a group:
+        #   'mean_correct'   : mean of correct rollouts (default, used by DGDO main)
+        #   'min_correct'    : min of correct rollouts (SOL-style, ShorterBetter)
+        #   'median_correct' : median of correct rollouts
+        #   'mean_all'       : mean over ALL rollouts (no correctness filter)
+        self.dgdo_eff_aggregator = config.algorithm.get('dgdo_eff_aggregator', 'mean_correct')
+        # If set (not None), bypass the dynamic CV*Potential weight computation and
+        # use this fixed value as w_corr (with w_eff = 1 - w_corr). Used by the
+        # static-vs-dynamic ablation; leave None for the default DGDO behaviour.
+        self.dgdo_eff_static_w_corr = config.algorithm.get('dgdo_eff_static_w_corr', None)
         self._dgdo_eff_step_count = 0
 
         # Parse reward bounds from env vars: DGDO2_BOUNDS_CORRECTNESS="-3.0,3.0" etc.
@@ -1411,10 +1460,12 @@ class RayPPOTrainer(object):
                 # self.config.trainer.default_hdfs_dir, 'critic')
             self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
 
-        # Save optimizer and LR scheduler state (sharded per rank)
-        optim_local_path = os.path.join(self.config.trainer.default_local_dir, 'optimizer',
-                                        f'global_step_{self.global_steps}')
-        self.actor_rollout_wg.save_optimizer_checkpoint(optim_local_path)
+        # Save optimizer and LR scheduler state (sharded per rank).
+        # Gated by trainer.save_optimizer so lambda-sweep / throwaway runs can skip it.
+        if self.config.trainer.get('save_optimizer', True):
+            optim_local_path = os.path.join(self.config.trainer.default_local_dir, 'optimizer',
+                                            f'global_step_{self.global_steps}')
+            self.actor_rollout_wg.save_optimizer_checkpoint(optim_local_path)
 
         # Save training state on driver (DGDO state, global_steps, etc.)
         training_state = {
@@ -1660,6 +1711,8 @@ class RayPPOTrainer(object):
                                 'bmax': self.dgdo_eff_bmax,
                                 'w_min': self.dgdo_eff_w_min,
                                 'lstar_mode': self.dgdo_eff_lstar_mode,
+                                'aggregator': self.dgdo_eff_aggregator,
+                                'static_w_corr': self.dgdo_eff_static_w_corr,
                                 'step_count': self._dgdo_eff_step_count,
                             }
 
